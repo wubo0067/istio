@@ -203,6 +203,60 @@ func printError(err error) {
 	scope.Debugf("%v", err)
 }
 
+func validatePDB(path util.Path, val interface{})  (errs util.Errors) {
+	if val == true {
+		fmt.Printf("abc========")
+	}
+	return nil
+}
+// Check HA mode
+var checkEnabledMap = make(map[string]bool)
+var checkAutoscaleMinMap = make(map[string]float64)
+
+func checkEnabled(path util.Path, val interface{})  (errs util.Errors){
+	checkEnabledMap[path.String()] = val.(bool)
+	return nil
+}
+
+func checkAutoscaleMin(path util.Path, val interface{})  (errs util.Errors) {
+	checkAutoscaleMinMap[path.String()] = val.(float64)
+	return nil
+}
+
+func checkMap(m1 map[string]bool, m2 map[string]float64, keys []string) (util.Errors, []bool, float64) {
+	enabled := []bool{}
+	scalemin := float64(0)
+	if pdbEnabled, ok := m1[keys[0]]; ok {
+		enabled[0] = pdbEnabled
+	} else {
+		return util.NewErrs(fmt.Errorf("Your autoscaleMin should be at least 2 under HA setting.")), []bool{}, 0
+	}
+
+	if autoscaleEnabled, ok := m1[keys[1]]; ok {
+		enabled[1] = autoscaleEnabled
+	} else {
+		return util.NewErrs(fmt.Errorf("Your autoscaleMin should be at least 2 under HA setting.")), []bool{}, 0
+	}
+
+	if autoscaleMin, ok := m2[keys[2]]; ok {
+		scalemin = autoscaleMin
+	} else {
+		return util.NewErrs(fmt.Errorf("Your autoscaleMin should be at least 2 under HA setting.")), []bool{}, 0
+	}
+	return nil, enabled, scalemin
+}
+
+func validateDefaultPDB(checkEnabledMap map[string]bool, checkAutoscaleMinMap map[string]float64) util.Errors {
+	err, enabled, scalemin := checkMap(checkEnabledMap, checkAutoscaleMinMap, []string{`global\.defaultPodDisruptionBudget\.enabled`, "pilot.autoscaleEnabled", "pilot.autoscaleMin"})
+	if err != nil {
+		return util.NewErrs(err)
+	}
+	if enabled[0] && enabled[1] && scalemin <= 1 {
+		return util.NewErrs(fmt.Errorf("Your autoscaleMin should be at least 2 under HA setting."))
+	}
+	return nil
+}
+
 // logWithError prints debug log with err message
 func logWithError(err error, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
@@ -269,6 +323,8 @@ func anchored(res ...*regexp.Regexp) *regexp.Regexp {
 
 // ValidatorFunc validates a value.
 type ValidatorFunc func(path util.Path, i interface{}) util.Errors
+
+//type CheckFunc func(path util.Path, i interface{})
 
 // UnmarshalIOP unmarshals a string containing IstioOperator as YAML.
 func UnmarshalIOP(iopYAML string) (*v1alpha1.IstioOperator, error) {

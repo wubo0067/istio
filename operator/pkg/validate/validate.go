@@ -39,6 +39,10 @@ var (
 		"Tag":                                validateTag,
 		"Components.IngressGateways[*].Name": validateGatewayName,
 		"Components.EgressGateways[*].Name":  validateGatewayName,
+		//"Components.IgressGateways[*].K8S.HpaSpec.MinReplicas": validateHpaSpec,
+
+		//"Components.EgressGateways[*].K8S.HpaSpec.MinReplicas": validateHpaSpec,
+		//"Components.Pilot.K8S.HpaSpec.MinReplicas": validateHpaSpec,
 	}
 	// requiredValues lists all the values that must be non-empty.
 	requiredValues = map[string]bool{}
@@ -200,4 +204,11 @@ func validateGatewayName(path util.Path, val interface{}) util.Errors {
 		return nil
 	}
 	return validateWithRegex(path, val, ObjectNameRegexp)
+}
+
+func validateHpaSpec(path util.Path, val interface{}) util.Errors {
+	if val == true {
+		fmt.Printf("abc")
+	}
+	return nil
 }
