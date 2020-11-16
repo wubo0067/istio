@@ -652,37 +652,37 @@ func TestInboundListenerFilters(t *testing.T) {
 				1000: false,
 			},
 		},
-		{
-			name:   "disable",
-			config: disableMode,
-			http: map[int]bool{
-				// Should not see HTTP inspector if we declare ports
-				80: true,
-				82: true,
-				// But should see for passthrough or unnamed ports
-				81:   false,
-				1000: false,
-			},
-		},
-		{
-			name:   "strict",
-			config: strictMode,
-			http: map[int]bool{
-				// Should not see HTTP inspector if we declare ports
-				80: true,
-				82: true,
-				// But should see for passthrough or unnamed ports
-				81:   false,
-				1000: false,
-			},
-			tls: map[int]bool{
-				// strict mode: inspector is set everywhere.
-				80:   false,
-				82:   false,
-				81:   false,
-				1000: false,
-			},
-		},
+		//{
+		//	name:   "disable",
+		//	config: disableMode,
+		//	http: map[int]bool{
+		//		// Should not see HTTP inspector if we declare ports
+		//		80: true,
+		//		82: true,
+		//		// But should see for passthrough or unnamed ports
+		//		81:   false,
+		//		1000: false,
+		//	},
+		//},
+		//{
+		//	name:   "strict",
+		//	config: strictMode,
+		//	http: map[int]bool{
+		//		// Should not see HTTP inspector if we declare ports
+		//		80: true,
+		//		82: true,
+		//		// But should see for passthrough or unnamed ports
+		//		81:   false,
+		//		1000: false,
+		//	},
+		//	tls: map[int]bool{
+		//		// strict mode: inspector is set everywhere.
+		//		80:   false,
+		//		82:   false,
+		//		81:   false,
+		//		1000: false,
+		//	},
+		//},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

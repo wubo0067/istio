@@ -80,6 +80,7 @@ var (
 		plugin.Authn,
 		plugin.Authz,
 		plugin.Health,
+		plugin.Http_Metadataexchange,
 	}
 )
 

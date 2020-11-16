@@ -177,7 +177,7 @@ type Proxy struct {
 
 	// IPAddresses is the IP addresses of the proxy used to identify it and its
 	// co-located service instances. Example: "10.60.1.6". In some cases, the host
-	// where the poxy and service instances reside may have more than one IP address
+	// where the proxy and service instances reside may have more than one IP address
 	IPAddresses []string
 
 	// ID is the unique platform-specific sidecar proxy ID. For k8s it is the pod ID and
@@ -435,7 +435,7 @@ type BootstrapNodeMetadata struct {
 // nolint: maligned
 type NodeMetadata struct {
 	// ProxyConfig defines the proxy config specified for a proxy.
-	// Note that this setting may be configured different for each proxy, due user overrides
+	// Note that this setting may be configured differently for each proxy, due to user overrides
 	// or from different versions of proxies connecting. While Pilot has access to the meshConfig.defaultConfig,
 	// this field should be preferred if it is present.
 	ProxyConfig *NodeMetaProxyConfig `json:"PROXY_CONFIG,omitempty"`

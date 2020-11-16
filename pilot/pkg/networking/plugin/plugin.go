@@ -28,6 +28,8 @@ const (
 	Authz = "authz"
 	// Health is the name of the health plugin passed through the command line
 	Health = "health"
+	// Http_Metadataexchange is the name of the telemetry plugin passed through the command line
+	Http_Metadataexchange = "http_metadataexchange"
 )
 
 // InputParams is a set of values passed to Plugin callback methods. Not all fields are guaranteed to
@@ -57,13 +59,15 @@ type Plugin interface {
 	// Can be used to add additional filters on the outbound path.
 	OnOutboundListener(in *InputParams, mutable *istionetworking.MutableObjects) error
 
-	// OnInboundListener is called whenever a new listener is added to the LDS output for a given service
-	// Can be used to add additional filters.
+	// OnInboundListener is called whenever a new inbound listener is added to the LDS output for a given service.
+	// Can be used to add additional filters on the inbound path.
 	OnInboundListener(in *InputParams, mutable *istionetworking.MutableObjects) error
 
 	// OnInboundFilterChains is called whenever a plugin needs to setup the filter chains, including relevant filter chain
 	// configuration, like FilterChainMatch and TLSContext.
 	OnInboundFilterChains(in *InputParams) []istionetworking.FilterChain
+
+	//TODO: OnOutboundFilterChains()
 
 	// OnInboundPassthrough is called whenever a new passthrough filter chain is added to the LDS output.
 	// Can be used to add additional filters.

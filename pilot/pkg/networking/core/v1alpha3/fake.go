@@ -143,7 +143,7 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
 	env.NetworksWatcher = opts.NetworksWatcher
 
 	if opts.Plugins == nil {
-		opts.Plugins = registry.NewPlugins([]string{plugin.AuthzCustom, plugin.Authn, plugin.Authz})
+		opts.Plugins = registry.NewPlugins([]string{plugin.AuthzCustom, plugin.Authn, plugin.Authz, plugin.Http_Metadataexchange})
 	}
 
 	fake := &ConfigGenTest{

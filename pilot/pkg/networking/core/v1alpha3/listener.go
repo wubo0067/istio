@@ -365,15 +365,14 @@ func (configgen *ConfigGeneratorImpl) buildSidecarInboundListeners(
 			// Inbound listeners will be aggregated into a single virtual listener (port 15006)
 			// As a result, we don't need to worry about binding to the endpoint IP; we already know
 			// all traffic for these listeners is inbound.
-			// TODO: directly build filter chains rather than translating listeneners to filter chains
+			// TODO: directly build filter chains rather than translating listeners to filter chains
 			wildcard, _ := getActualWildcardAndLocalHost(node)
 			bind := wildcard
 
 			// Local service instances can be accessed through one of three
-			// addresses: localhost, endpoint IP, and service
-			// VIP. Localhost bypasses the proxy and doesn't need any TCP
-			// route config. Endpoint IP is handled below and Service IP is handled
-			// by outbound routes.
+			// addresses: localhost, endpoint IP, and service VIP.
+			// Localhost bypasses the proxy and doesn't need any TCP route config.
+			// Endpoint IP is handled below and Service IP is handled by outbound routes.
 			// Traffic sent to our service VIP is redirected by remote
 			// services' kubeproxy to our specific endpoint IP.
 			port := *instance.ServicePort
