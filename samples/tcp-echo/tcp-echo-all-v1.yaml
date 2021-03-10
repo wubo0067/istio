@@ -21,7 +21,7 @@ spec:
     istio: ingressgateway
   servers:
   - port:
-      number: 31400
+      number: 31400   # 这个是外网端口，elb上的配置监听器。这个后端要指向一个nodeport ip+port
       name: tcp
       protocol: TCP
     hosts:

@@ -21,7 +21,7 @@ spec:
   hosts:
   - "*"
   gateways:
-  - bookinfo-gateway
+  - bookinfo-gateway # 这个virtual server对应gateway
   http:
   - match:
     - uri:

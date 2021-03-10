@@ -62,6 +62,7 @@ func (l *LeaderElection) Run(stop <-chan struct{}) {
 		l.cycle.Inc()
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
+			// 运行中要能停止
 			<-stop
 			cancel()
 		}()
