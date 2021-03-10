@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"regexp"
 	"strconv"
@@ -37,12 +38,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 	"go.opencensus.io/stats/view"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"istio.io/istio/pilot/cmd/pilot-agent/metrics"
 	"istio.io/istio/pilot/cmd/pilot-agent/status/ready"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/kube/apimirror"
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
 )
@@ -58,6 +59,14 @@ const (
 	// indicates that httpbin container liveness prober port is 8080 and probing path is /hello.
 	// This environment variable should never be set manually.
 	KubeAppProberEnvName = "ISTIO_KUBE_APP_PROBERS"
+
+	localHostIPv4 = "127.0.0.1"
+	localHostIPv6 = "[::1]"
+)
+
+var (
+	upstreamLocalAddressIPv4 = &net.TCPAddr{IP: net.ParseIP("127.0.0.6")}
+	upstreamLocalAddressIPv6 = &net.TCPAddr{IP: net.ParseIP("[::6]")}
 )
 
 var PrometheusScrapingConfig = env.RegisterStringVar("ISTIO_PROMETHEUS_ANNOTATIONS", "", "")
@@ -66,6 +75,9 @@ var (
 	appProberPattern = regexp.MustCompile(`^/app-health/[^/]+/(livez|readyz|startupz)$`)
 
 	promRegistry *prometheus.Registry
+
+	legacyLocalhostProbeDestination = env.RegisterBoolVar("REWRITE_PROBE_LEGACY_LOCALHOST_DESTINATION", false,
+		"If enabled, readiness probes will be sent to 'localhost'. Otherwise, they will be sent to the Pod's IP, matching Kubernetes' behavior.")
 )
 
 // KubeAppProbers holds the information about a Kubernetes pod prober.
@@ -76,30 +88,34 @@ type KubeAppProbers map[string]*Prober
 
 // Prober represents a single container prober
 type Prober struct {
-	HTTPGet        *corev1.HTTPGetAction `json:"httpGet"`
-	TimeoutSeconds int32                 `json:"timeoutSeconds,omitempty"`
+	HTTPGet        *apimirror.HTTPGetAction `json:"httpGet"`
+	TimeoutSeconds int32                    `json:"timeoutSeconds,omitempty"`
 }
 
 // Config for the status server.
 type Config struct {
-	LocalHostAddr string
+	// Ip of the pod. Note: this is only applicable for Kubernetes pods and should only be used for
+	// the prober.
+	PodIP string
 	// KubeAppProbers is a json with Kubernetes application prober config encoded.
 	KubeAppProbers string
 	NodeType       model.NodeType
 	StatusPort     uint16
 	AdminPort      uint16
+	IPv6           bool
 }
 
 // Server provides an endpoint for handling status probes.
 type Server struct {
-	ready               *ready.Probe
-	prometheus          *PrometheusScrapeConfiguration
-	mutex               sync.RWMutex
-	appKubeProbers      KubeAppProbers
-	appProbeClient      map[string]*http.Client
-	statusPort          uint16
-	lastProbeSuccessful bool
-	envoyStatsPort      int
+	ready                 *ready.Probe
+	prometheus            *PrometheusScrapeConfiguration
+	mutex                 sync.RWMutex
+	appProbersDestination string
+	appKubeProbers        KubeAppProbers
+	appProbeClient        map[string]*http.Client
+	statusPort            uint16
+	lastProbeSuccessful   bool
+	envoyStatsPort        int
 }
 
 func init() {
@@ -119,14 +135,21 @@ func init() {
 
 // NewServer creates a new status server.
 func NewServer(config Config) (*Server, error) {
+	localhost := localHostIPv4
+	if config.IPv6 {
+		localhost = localHostIPv6
+	}
 	s := &Server{
 		statusPort: config.StatusPort,
 		ready: &ready.Probe{
-			LocalHostAddr: config.LocalHostAddr,
+			LocalHostAddr: localhost,
 			AdminPort:     config.AdminPort,
-			NodeType:      config.NodeType,
 		},
-		envoyStatsPort: 15090,
+		appProbersDestination: config.PodIP,
+		envoyStatsPort:        15090,
+	}
+	if legacyLocalhostProbeDestination.Get() {
+		s.appProbersDestination = "localhost"
 	}
 
 	// Enable prometheus server if its configured and a sidecar
@@ -173,6 +196,13 @@ func NewServer(config Config) (*Server, error) {
 		if prober.HTTPGet.Port.Type != intstr.Int {
 			return nil, fmt.Errorf("invalid prober config for %v, the port must be int type", path)
 		}
+		localAddr := upstreamLocalAddressIPv4
+		if config.IPv6 {
+			localAddr = upstreamLocalAddressIPv6
+		}
+		d := &net.Dialer{
+			LocalAddr: localAddr,
+		}
 		// Construct a http client and cache it in order to reuse the connection.
 		s.appProbeClient[path] = &http.Client{
 			Timeout: time.Duration(prober.TimeoutSeconds) * time.Second,
@@ -180,6 +210,7 @@ func NewServer(config Config) (*Server, error) {
 			// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/#configure-probes
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				DialContext:     d.DialContext,
 			},
 		}
 	}
@@ -197,7 +228,7 @@ func FormatProberURL(container string) (string, string, string) {
 
 // Run opens a the status port and begins accepting probes.
 func (s *Server) Run(ctx context.Context) {
-	log.Infof("Opening status port %d\n", s.statusPort)
+	log.Infof("Opening status port %d", s.statusPort)
 
 	mux := http.NewServeMux()
 
@@ -206,6 +237,13 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc(`/stats/prometheus`, s.handleStats)
 	mux.HandleFunc(quitPath, s.handleQuit)
 	mux.HandleFunc("/app-health/", s.handleAppProbe)
+
+	// Add the handler for pprof.
+	mux.HandleFunc("/debug/pprof/", s.handlePprofIndex)
+	mux.HandleFunc("/debug/pprof/cmdline", s.handlePprofCmdline)
+	mux.HandleFunc("/debug/pprof/profile", s.handlePprofProfile)
+	mux.HandleFunc("/debug/pprof/symbol", s.handlePprofSymbol)
+	mux.HandleFunc("/debug/pprof/trace", s.handlePprofTrace)
 
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", s.statusPort))
 	if err != nil {
@@ -240,6 +278,51 @@ func (s *Server) Run(ctx context.Context) {
 	// Wait for the agent to be shut down.
 	<-ctx.Done()
 	log.Info("Status server has successfully terminated")
+}
+
+func (s *Server) handlePprofIndex(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Index(w, r)
+}
+
+func (s *Server) handlePprofCmdline(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Cmdline(w, r)
+}
+
+func (s *Server) handlePprofSymbol(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Symbol(w, r)
+}
+
+func (s *Server) handlePprofProfile(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Profile(w, r)
+}
+
+func (s *Server) handlePprofTrace(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Trace(w, r)
 }
 
 func (s *Server) handleReadyProbe(w http.ResponseWriter, _ *http.Request) {
@@ -432,10 +515,10 @@ func (s *Server) handleAppProbe(w http.ResponseWriter, req *http.Request) {
 		proberPath = "/" + proberPath
 	}
 	var url string
-	if prober.HTTPGet.Scheme == corev1.URISchemeHTTPS {
-		url = fmt.Sprintf("https://localhost:%v%s", prober.HTTPGet.Port.IntValue(), proberPath)
+	if prober.HTTPGet.Scheme == apimirror.URISchemeHTTPS {
+		url = fmt.Sprintf("https://%s:%v%s", s.appProbersDestination, prober.HTTPGet.Port.IntValue(), proberPath)
 	} else {
-		url = fmt.Sprintf("http://localhost:%v%s", prober.HTTPGet.Port.IntValue(), proberPath)
+		url = fmt.Sprintf("http://%s:%v%s", s.appProbersDestination, prober.HTTPGet.Port.IntValue(), proberPath)
 	}
 	appReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {

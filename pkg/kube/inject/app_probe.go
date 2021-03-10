@@ -46,8 +46,13 @@ func ShouldRewriteAppHTTPProbers(annotations map[string]string, specSetting *typ
 
 // FindSidecar returns the pointer to the first container whose name matches the "istio-proxy".
 func FindSidecar(containers []corev1.Container) *corev1.Container {
+	return FindContainer(ProxyContainerName, containers)
+}
+
+// FindContainer returns the pointer to the first container whose name matches.
+func FindContainer(name string, containers []corev1.Container) *corev1.Container {
 	for i := range containers {
-		if containers[i].Name == ProxyContainerName {
+		if containers[i].Name == name {
 			return &containers[i]
 		}
 	}
@@ -72,11 +77,19 @@ func convertAppProber(probe *corev1.Probe, newURL string, statusPort int) *corev
 	return p
 }
 
+type KubeAppProbers map[string]*Prober
+
+// Prober represents a single container prober
+type Prober struct {
+	HTTPGet        *corev1.HTTPGetAction `json:"httpGet"`
+	TimeoutSeconds int32                 `json:"timeoutSeconds,omitempty"`
+}
+
 // DumpAppProbers returns a json encoded string as `status.KubeAppProbers`.
 // Also update the probers so that all usages of named port will be resolved to integer.
 func DumpAppProbers(podspec *corev1.PodSpec, targetPort int32) string {
-	out := status.KubeAppProbers{}
-	updateNamedPort := func(p *status.Prober, portMap map[string]int32) *status.Prober {
+	out := KubeAppProbers{}
+	updateNamedPort := func(p *Prober, portMap map[string]int32) *Prober {
 		if p == nil || p.HTTPGet == nil {
 			return nil
 		}
@@ -164,7 +177,7 @@ func patchRewriteProbe(annotations map[string]string, pod *corev1.Pod, defaultPo
 }
 
 // kubeProbeToInternalProber converts a Kubernetes Probe to an Istio internal Prober
-func kubeProbeToInternalProber(probe *corev1.Probe) *status.Prober {
+func kubeProbeToInternalProber(probe *corev1.Probe) *Prober {
 	if probe == nil {
 		return nil
 	}
@@ -173,7 +186,7 @@ func kubeProbeToInternalProber(probe *corev1.Probe) *status.Prober {
 		return nil
 	}
 
-	return &status.Prober{
+	return &Prober{
 		HTTPGet:        probe.HTTPGet,
 		TimeoutSeconds: probe.TimeoutSeconds,
 	}

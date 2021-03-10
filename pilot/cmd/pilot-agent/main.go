@@ -27,10 +27,10 @@ import (
 	"github.com/spf13/cobra/doc"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
+	"istio.io/istio/pilot/cmd/pilot-agent/config"
+	secopt "istio.io/istio/pilot/cmd/pilot-agent/security"
 	"istio.io/istio/pilot/cmd/pilot-agent/status"
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
-	securityModel "istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pilot/pkg/util/network"
 	"istio.io/istio/pkg/cmd"
 	"istio.io/istio/pkg/config/constants"
@@ -39,7 +39,6 @@ import (
 	"istio.io/istio/pkg/jwt"
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
-	"istio.io/istio/security/pkg/credentialfetcher"
 	stsserver "istio.io/istio/security/pkg/stsservice/server"
 	"istio.io/istio/security/pkg/stsservice/tokenmanager"
 	cleaniptables "istio.io/istio/tools/istio-clean-iptables/pkg/cmd"
@@ -51,9 +50,8 @@ import (
 )
 
 const (
-	trustworthyJWTPath = "./var/run/secrets/tokens/istio-token"
-	localHostIPv4      = "127.0.0.1"
-	localHostIPv6      = "[::1]"
+	localHostIPv4 = "127.0.0.1"
+	localHostIPv6 = "[::1]"
 
 	// Similar with ISTIO_META_, which is used to customize the node metadata - this customizes extra header.
 	xdsHeaderPrefix = "XDS_HEADER_"
@@ -83,7 +81,8 @@ var (
 	kubeAppProberNameVar = env.RegisterStringVar(status.KubeAppProberEnvName, "", "")
 	serviceAccountVar    = env.RegisterStringVar("SERVICE_ACCOUNT", "", "Name of service account")
 	clusterIDVar         = env.RegisterStringVar("ISTIO_META_CLUSTER_ID", "", "")
-	callCredentials      = env.RegisterBoolVar("CALL_CREDENTIALS", false, "Use JWT directly instead of MTLS")
+	// Provider for XDS auth, e.g., gcp. By default, it is empty, meaning no auth provider.
+	xdsAuthProvider = env.RegisterStringVar("XDS_AUTH_PROVIDER", "", "Provider for XDS auth")
 
 	pilotCertProvider = env.RegisterStringVar("PILOT_CERT_PROVIDER", "istiod",
 		"The provider of Pilot DNS certificate.").Get()
@@ -95,11 +94,11 @@ var (
 	provCert = env.RegisterStringVar("PROV_CERT", "",
 		"Set to a directory containing provisioned certs, for VMs").Get()
 
-	// set to "/etc/ssl/certs/ca-certificates.crt" on debian/ubuntu for ACME/public signed XDS servers.
+	// set to "SYSTEM" for ACME/public signed XDS servers.
 	xdsRootCA = env.RegisterStringVar("XDS_ROOT_CA", "",
 		"Explicitly set the root CA to expect for the XDS connection.").Get()
 
-	// set to "/etc/ssl/certs/ca-certificates.crt" on debian/ubuntu for ACME/public signed CA servers.
+	// set to "SYSTEM" for ACME/public signed CA servers.
 	caRootCA = env.RegisterStringVar("CA_ROOT_CA", "",
 		"Explicitly set the root CA to expect for the CA connection.").Get()
 
@@ -113,12 +112,7 @@ var (
 	).Get()
 
 	caProviderEnv = env.RegisterStringVar("CA_PROVIDER", "Citadel", "name of authentication provider").Get()
-	// TODO: default to same as discovery address
-	caEndpointEnv = env.RegisterStringVar("CA_ADDR", "", "Address of the spiffee certificate provider. Defaults to discoveryAddress").Get()
-
-	// This is also disabled by presence of the SDS socket directory
-	enableGatewaySDSEnv = env.RegisterBoolVar("ENABLE_INGRESS_GATEWAY_SDS", false,
-		"Enable provisioning gateway secrets. Requires Secret read permission").Get()
+	caEndpointEnv = env.RegisterStringVar("CA_ADDR", "", "Address of the spiffe certificate provider. Defaults to discoveryAddress").Get()
 
 	trustDomainEnv = env.RegisterStringVar("TRUST_DOMAIN", "cluster.local",
 		"The trust domain for spiffe certificates").Get()
@@ -127,16 +121,10 @@ var (
 		"The cert lifetime requested by istio agent").Get()
 	secretRotationGracePeriodRatioEnv = env.RegisterFloatVar("SECRET_GRACE_PERIOD_RATIO", 0.5,
 		"The grace period ratio for the cert rotation, by default 0.5.").Get()
-	secretRotationIntervalEnv = env.RegisterDurationVar("SECRET_ROTATION_CHECK_INTERVAL", 5*time.Minute,
-		"The ticker to detect and rotate the certificates, by default 5 minutes").Get()
-	staledConnectionRecycleIntervalEnv = env.RegisterDurationVar("STALED_CONNECTION_RECYCLE_RUN_INTERVAL", 5*time.Minute,
-		"The ticker to detect and close stale connections").Get()
-	initialBackoffInMilliSecEnv = env.RegisterIntVar("INITIAL_BACKOFF_MSEC", 0, "").Get()
-	pkcs8KeysEnv                = env.RegisterBoolVar("PKCS8_KEY", false,
+	pkcs8KeysEnv = env.RegisterBoolVar("PKCS8_KEY", false,
 		"Whether to generate PKCS#8 private keys").Get()
 	eccSigAlgEnv        = env.RegisterStringVar("ECC_SIGNATURE_ALGORITHM", "", "The type of ECC signature algorithm to use when generating private keys").Get()
 	fileMountedCertsEnv = env.RegisterBoolVar("FILE_MOUNTED_CERTS", false, "").Get()
-	useTokenForCSREnv   = env.RegisterBoolVar("USE_TOKEN_FOR_CSR", false, "CSR requires a token").Get()
 	credFetcherTypeEnv  = env.RegisterStringVar("CREDENTIAL_FETCHER_TYPE", "",
 		"The type of the credential fetcher. Currently supported types include GoogleComputeEngine").Get()
 	credIdentityProvider = env.RegisterStringVar("CREDENTIAL_IDENTITY_PROVIDER", "GoogleComputeEngine",
@@ -191,7 +179,6 @@ var (
 
 			// Obtain all the IPs from the node
 			if ipAddrs, ok := network.GetPrivateIPs(context.Background()); ok {
-				log.Infof("Obtained private IP %v", ipAddrs)
 				if len(role.IPAddresses) == 1 {
 					for _, ip := range ipAddrs {
 						// prevent duplicate ips, the first one must be the pod ip
@@ -216,7 +203,7 @@ var (
 			// operational parameters correctly.
 			proxyIPv6 := isIPv6Proxy(role.IPAddresses)
 
-			proxyConfig, err := constructProxyConfig()
+			proxyConfig, err := config.ConstructProxyConfig(meshConfigFile, serviceCluster, proxyConfigEnv, concurrency, role)
 			if err != nil {
 				return fmt.Errorf("failed to get proxy config: %v", err)
 			}
@@ -229,68 +216,65 @@ var (
 			// If not set, set a default based on platform - podNamespace.svc.cluster.local for
 			// K8S
 			role.DNSDomain = getDNSDomain(podNamespace, role.DNSDomain)
-			log.Infof("Proxy role: %#v", role)
+			log.WithLabels("ips", role.IPAddresses, "type", role.Type, "id", role.ID, "domain", role.DNSDomain).Info("Proxy role")
 
-			var jwtPath string
-			if jwtPolicy.Get() == jwt.PolicyThirdParty {
-				log.Info("JWT policy is third-party-jwt")
-				jwtPath = trustworthyJWTPath
-			} else if jwtPolicy.Get() == jwt.PolicyFirstParty {
-				log.Info("JWT policy is first-party-jwt")
-				jwtPath = securityModel.K8sSAJwtFileName
-			} else {
-				log.Info("Using existing certs")
+			sop := security.Options{
+				CAEndpoint:                     caEndpointEnv,
+				CAProviderName:                 caProviderEnv,
+				PilotCertProvider:              pilotCertProvider,
+				OutputKeyCertToDir:             outputKeyCertToDir,
+				ProvCert:                       provCert,
+				WorkloadUDSPath:                security.DefaultLocalSDSPath,
+				ClusterID:                      clusterIDVar.Get(),
+				FileMountedCerts:               fileMountedCertsEnv,
+				WorkloadNamespace:              podNamespaceVar.Get(),
+				ServiceAccount:                 serviceAccountVar.Get(),
+				XdsAuthProvider:                xdsAuthProvider.Get(),
+				TrustDomain:                    trustDomainEnv,
+				Pkcs8Keys:                      pkcs8KeysEnv,
+				ECCSigAlg:                      eccSigAlgEnv,
+				SecretTTL:                      secretTTLEnv,
+				SecretRotationGracePeriodRatio: secretRotationGracePeriodRatioEnv,
 			}
-
-			secOpts := &security.Options{
-				PilotCertProvider:  pilotCertProvider,
-				OutputKeyCertToDir: outputKeyCertToDir,
-				ProvCert:           provCert,
-				JWTPath:            jwtPath,
-				ClusterID:          clusterIDVar.Get(),
-				FileMountedCerts:   fileMountedCertsEnv,
-				CAEndpoint:         caEndpointEnv,
-				UseTokenForCSR:     useTokenForCSREnv,
-				CredFetcher:        nil,
-				WorkloadNamespace:  podNamespace,
-				ServiceAccount:     serviceAccountVar.Get(),
+			secOpts, err := secopt.SetupSecurityOptions(proxyConfig, sop, jwtPolicy.Get(),
+				credFetcherTypeEnv, credIdentityProvider)
+			if err != nil {
+				return err
 			}
-			// If not set explicitly, default to the discovery address.
-			if caEndpointEnv == "" {
-				secOpts.CAEndpoint = proxyConfig.DiscoveryAddress
+			var tokenManager security.TokenManager
+			if stsPort > 0 || xdsAuthProvider.Get() != "" {
+				// tokenManager is gcp token manager when using the default token manager plugin.
+				tokenManager = tokenmanager.CreateTokenManager(tokenManagerPlugin,
+					tokenmanager.Config{CredFetcher: secOpts.CredFetcher, TrustDomain: secOpts.TrustDomain})
 			}
+			secOpts.TokenManager = tokenManager
 
-			secOpts.EnableWorkloadSDS = true
-			secOpts.EnableGatewaySDS = enableGatewaySDSEnv
-			secOpts.CAProviderName = caProviderEnv
-
-			secOpts.TrustDomain = trustDomainEnv
-			secOpts.Pkcs8Keys = pkcs8KeysEnv
-			secOpts.ECCSigAlg = eccSigAlgEnv
-			secOpts.RecycleInterval = staledConnectionRecycleIntervalEnv
-			secOpts.SecretTTL = secretTTLEnv
-			secOpts.SecretRotationGracePeriodRatio = secretRotationGracePeriodRatioEnv
-			secOpts.RotationInterval = secretRotationIntervalEnv
-			secOpts.InitialBackoffInMilliSec = int64(initialBackoffInMilliSecEnv)
-			// Disable the secret eviction for istio agent.
-			secOpts.EvictionDuration = 0
-
-			// TODO (liminw): CredFetcher is a general interface. In 1.7, we limit the use on GCE only because
-			// GCE is the only supported plugin at the moment.
-			if credFetcherTypeEnv == security.GCE {
-				secOpts.CredIdentityProvider = credIdentityProvider
-				credFetcher, err := credentialfetcher.NewCredFetcher(credFetcherTypeEnv, secOpts.TrustDomain, jwtPath, secOpts.CredIdentityProvider)
-				if err != nil {
-					return fmt.Errorf("failed to create credential fetcher: %v", err)
+			// If security token service (STS) port is not zero, start STS server and
+			// listen on STS port for STS requests. For STS, see
+			// https://tools.ietf.org/html/draft-ietf-oauth-token-exchange-16.
+			// STS is used for stackdriver or other Envoy services using google gRPC.
+			if stsPort > 0 {
+				localHostAddr := localHostIPv4
+				if proxyIPv6 {
+					localHostAddr = localHostIPv6
 				}
-				log.Infof("Start credential fetcher of %s type in %s trust domain", credFetcherTypeEnv, secOpts.TrustDomain)
-				secOpts.CredFetcher = credFetcher
+				stsServer, err := stsserver.NewServer(stsserver.Config{
+					LocalHostAddr: localHostAddr,
+					LocalPort:     stsPort,
+				}, tokenManager)
+				if err != nil {
+					return err
+				}
+				defer stsServer.Stop()
 			}
 
 			agentConfig := &istio_agent.AgentConfig{
 				XDSRootCerts: xdsRootCA,
 				CARootCerts:  caRootCA,
 				XDSHeaders:   map[string]string{},
+				XdsUdsPath:   constants.DefaultXdsUdsPath,
+				IsIPv6:       proxyIPv6,
+				ProxyType:    role.Type,
 			}
 			extractXDSHeadersFromEnv(agentConfig)
 			if proxyXDSViaAgent {
@@ -304,13 +288,12 @@ var (
 			var pilotSAN []string
 			if proxyConfig.ControlPlaneAuthPolicy == meshconfig.AuthenticationPolicy_MUTUAL_TLS {
 				// Obtain Pilot SAN, using DNS.
-				pilotSAN = []string{getPilotSan(proxyConfig.DiscoveryAddress)}
+				pilotSAN = []string{config.GetPilotSan(proxyConfig.DiscoveryAddress)}
 			}
-			log.Infof("PilotSAN %#v", pilotSAN)
+			log.Infof("Pilot SAN: %v", pilotSAN)
 
 			// Start in process SDS.
-			_, err = sa.Start(role.Type == model.SidecarProxy, podNamespaceVar.Get())
-			if err != nil {
+			if err := sa.Start(); err != nil {
 				log.Fatala("Failed to start in-process SDS", err)
 			}
 
@@ -329,48 +312,30 @@ var (
 				}
 			}
 
-			// If security token service (STS) port is not zero, start STS server and
-			// listen on STS port for STS requests. For STS, see
-			// https://tools.ietf.org/html/draft-ietf-oauth-token-exchange-16.
-			if stsPort > 0 {
-				localHostAddr := localHostIPv4
-				if proxyIPv6 {
-					localHostAddr = localHostIPv6
-				}
-				tokenManager := tokenmanager.CreateTokenManager(tokenManagerPlugin,
-					tokenmanager.Config{CredFetcher: secOpts.CredFetcher, TrustDomain: secOpts.TrustDomain})
-				stsServer, err := stsserver.NewServer(stsserver.Config{
-					LocalHostAddr: localHostAddr,
-					LocalPort:     stsPort,
-				}, tokenManager)
-				if err != nil {
-					return err
-				}
-				defer stsServer.Stop()
+			provCert := sa.FindRootCAForXDS()
+			if provCert == "" {
+				// Envoy only supports load from file. If we want to use system certs, use best guess
+				// To be more correct this could lookup all the "well known" paths but this is extremely \
+				// unlikely to run on a non-debian based machine, and if it is it can be explicitly configured
+				provCert = "/etc/ssl/certs/ca-certificates.crt"
 			}
-
 			envoyProxy := envoy.NewProxy(envoy.ProxyConfig{
 				Config:              proxyConfig,
 				Node:                role.ServiceNode(),
 				LogLevel:            proxyLogLevel,
 				ComponentLogLevel:   proxyComponentLogLevel,
+				LogAsJSON:           loggingOptions.JSONEncoding,
 				PilotSubjectAltName: pilotSAN,
 				NodeIPs:             role.IPAddresses,
 				STSPort:             stsPort,
 				OutlierLogPath:      outlierLogPath,
 				PilotCertProvider:   pilotCertProvider,
-				ProvCert:            sa.FindRootCAForXDS(),
+				ProvCert:            provCert,
 				Sidecar:             role.Type == model.SidecarProxy,
 				ProxyViaAgent:       agentConfig.ProxyXDSViaAgent,
-				CallCredentials:     callCredentials.Get(),
 			})
 
 			drainDuration, _ := types.DurationFromProto(proxyConfig.TerminationDrainDuration)
-			if ds, f := features.TerminationDrainDuration.Lookup(); f {
-				// Legacy environment variable is set, us that instead
-				drainDuration = time.Second * time.Duration(ds)
-			}
-
 			agent := envoy.NewAgent(envoyProxy, drainDuration)
 
 			// Watcher is also kicking envoy start.
@@ -401,13 +366,10 @@ func extractXDSHeadersFromEnv(config *istio_agent.AgentConfig) {
 }
 
 func initStatusServer(ctx context.Context, proxyIPv6 bool, proxyConfig meshconfig.ProxyConfig) error {
-	localHostAddr := localHostIPv4
-	if proxyIPv6 {
-		localHostAddr = localHostIPv6
-	}
 	prober := kubeAppProberNameVar.Get()
 	statusServer, err := status.NewServer(status.Config{
-		LocalHostAddr:  localHostAddr,
+		IPv6:           proxyIPv6,
+		PodIP:          instanceIPVar.Get(),
 		AdminPort:      uint16(proxyConfig.ProxyAdminPort),
 		StatusPort:     uint16(proxyConfig.StatusPort),
 		KubeAppProbers: prober,

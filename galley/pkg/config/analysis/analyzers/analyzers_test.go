@@ -34,8 +34,10 @@ import (
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/injection"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/multicluster"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/service"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/serviceentry"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/sidecar"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/virtualservice"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/webhook"
 	"istio.io/istio/galley/pkg/config/analysis/diag"
 	"istio.io/istio/galley/pkg/config/analysis/local"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
@@ -78,6 +80,7 @@ var testGrid = []testCase{
 			{msg.MisplacedAnnotation, "Pod grafana-test"},
 			{msg.MisplacedAnnotation, "Deployment fortio-deploy"},
 			{msg.MisplacedAnnotation, "Namespace staging"},
+			{msg.DeprecatedAnnotation, "Deployment fortio-deploy"},
 		},
 	},
 	{
@@ -279,6 +282,7 @@ var testGrid = []testCase{
 			{msg.DeploymentAssociatedToMultipleServices, "Deployment multiple-without-port.bookinfo"},
 			{msg.DeploymentRequiresServiceAssociated, "Deployment no-services.bookinfo"},
 			{msg.DeploymentRequiresServiceAssociated, "Deployment ann-enabled-ns-disabled.injection-disabled-ns"},
+			{msg.DeploymentConflictingPorts, "Deployment conflicting-ports.bookinfo"},
 		},
 	},
 	{
@@ -429,6 +433,43 @@ var testGrid = []testCase{
 			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-02-test-02.default"},
 			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-02-test-03.default"},
 			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-03-test-04.default"},
+		},
+	},
+	{
+		name: "missing Addresses and Protocol in Service Entry",
+		inputFiles: []string{
+			"testdata/serviceentry-missing-addresses-protocol.yaml",
+		},
+		analyzer: &serviceentry.ProtocolAdressesAnalyzer{},
+		expected: []message{
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-03.default"},
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-04.default"},
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-07.default"},
+		},
+	},
+	{
+		name: "certificate duplication in Gateway",
+		inputFiles: []string{
+			"testdata/gateway-duplicate-certificate.yaml",
+		},
+		analyzer: &gateway.CertificateAnalyzer{},
+		expected: []message{
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-01.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-02-test-01.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-02.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-03.default"},
+		},
+	},
+	{
+		name: "webook",
+		inputFiles: []string{
+			"testdata/webhook.yaml",
+		},
+		analyzer: &webhook.Analyzer{},
+		expected: []message{
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-missing-overlap"},
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-missing-overlap"},
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-overlap"},
 		},
 	},
 }

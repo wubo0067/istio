@@ -24,15 +24,14 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/util/retry"
+	"istio.io/istio/pkg/test/util/yml"
 )
 
 // callsPerCluster is used to ensure cross-cluster load balancing has a chance to work
 const callsPerCluster = 5
 
-var (
-	// Slow down retries to allow for delayed_close_timeout. Also require 3 successive successes.
-	retryOptions = []retry.Option{retry.Delay(1000 * time.Millisecond), retry.Converge(3)}
-)
+// Slow down retries to allow for delayed_close_timeout. Also require 3 successive successes.
+var retryOptions = []retry.Option{retry.Delay(1000 * time.Millisecond), retry.Converge(3)}
 
 type TrafficCall struct {
 	name string
@@ -56,15 +55,13 @@ type TrafficTestCase struct {
 }
 
 func (c TrafficTestCase) Run(ctx framework.TestContext, namespace string) {
-	ctx.NewSubTest(c.name).Run(func(ctx framework.TestContext) {
+	job := func(ctx framework.TestContext) {
 		if c.skip {
 			ctx.SkipNow()
 		}
 		if len(c.config) > 0 {
-			ctx.Config().ApplyYAMLOrFail(ctx, namespace, c.config)
-			ctx.Cleanup(func() {
-				_ = ctx.Config().DeleteYAML(namespace, c.config)
-			})
+			cfg := yml.MustApplyNamespace(ctx, c.config, namespace)
+			ctx.Config().ApplyYAMLOrFail(ctx, "", cfg)
 		}
 
 		if c.call != nil && len(c.children) > 0 {
@@ -81,20 +78,29 @@ func (c TrafficTestCase) Run(ctx framework.TestContext, namespace string) {
 				child.call(ctx, child.opts, retryOptions...)
 			})
 		}
-	})
+	}
+	if c.name != "" {
+		ctx.NewSubTest(c.name).Run(job)
+	} else {
+		job(ctx)
+	}
 }
 
 func RunAllTrafficTests(ctx framework.TestContext, apps *EchoDeployments) {
 	cases := map[string][]TrafficTestCase{}
 	cases["virtualservice"] = virtualServiceCases(apps)
 	cases["sniffing"] = protocolSniffingCases(apps)
+	cases["selfcall"] = selfCallsCases(apps)
 	cases["serverfirst"] = serverFirstTestCases(apps)
 	cases["gateway"] = gatewayCases(apps)
 	cases["loop"] = trafficLoopCases(apps)
+	cases["tls-origination"] = tlsOriginationCases(apps)
 	cases["instanceip"] = instanceIPTests(apps)
+	cases["services"] = serviceCases(apps)
 	if !ctx.Settings().SkipVM {
 		cases["vm"] = VMTestCases(apps.VM, apps)
 	}
+	cases["dns"] = DNSTestCases(apps)
 	for name, tts := range cases {
 		ctx.NewSubTest(name).Run(func(ctx framework.TestContext) {
 			for _, tt := range tts {

@@ -19,10 +19,10 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 export ISTIO_GO
 SHELL := /bin/bash -o pipefail
 
-export VERSION ?= 1.9-dev
+export VERSION ?= 1.10-dev
 
 # Base version of Istio image to use
-BASE_VERSION ?= 1.9-dev.1
+BASE_VERSION ?= 1.10-dev.1
 
 export GO111MODULE ?= on
 export GOPROXY ?= https://proxy.golang.org
@@ -185,6 +185,9 @@ ifeq ($(HUB),)
   $(error "HUB cannot be empty")
 endif
 
+# For dockerx builds, allow HUBS which is a space seperated list of hubs. Default to HUB.
+HUBS ?= $(HUB)
+
 # If tag not explicitly set in users' .istiorc.mk or command line, default to the git sha.
 TAG ?= $(shell git rev-parse --verify HEAD)
 ifeq ($(TAG),)
@@ -221,7 +224,9 @@ init: $(ISTIO_OUT)/istio_is_init
 # lock file, but it caused the rule for that file to get run (which
 # seems to be about obtaining a new version of the 3rd party libraries).
 $(ISTIO_OUT)/istio_is_init: bin/init.sh istio.deps | $(ISTIO_OUT)
-	ISTIO_OUT=$(ISTIO_OUT) ISTIO_BIN=$(ISTIO_BIN) GOOS_LOCAL=$(GOOS_LOCAL) bin/init.sh
+	@# Add a retry, as occasionally we see transient connection failures to GCS
+	@# Like `curl: (56) OpenSSL SSL_read: SSL_ERROR_SYSCALL, errno 104`
+	ISTIO_OUT=$(ISTIO_OUT) ISTIO_BIN=$(ISTIO_BIN) GOOS_LOCAL=$(GOOS_LOCAL) bin/retry.sh SSL_ERROR_SYSCALL bin/init.sh
 	touch $(ISTIO_OUT)/istio_is_init
 
 # init.sh downloads envoy and webassembly plugins
@@ -248,7 +253,7 @@ ${GEN_CERT}:
 #-----------------------------------------------------------------------------
 # Target: precommit
 #-----------------------------------------------------------------------------
-.PHONY: precommit format format.gofmt format.goimports lint buildcache
+.PHONY: precommit format lint buildcache
 
 # Target run by the pre-commit script, to automate formatting and lint
 # If pre-commit script is not used, please run this manually.
@@ -262,8 +267,12 @@ fmt: format-go format-python tidy-go
 buildcache:
 	GOBUILDFLAGS=-i $(MAKE) -e -f Makefile.core.mk build
 
+ifeq ($(DEBUG),1)
 # gobuild script uses custom linker flag to set the variables.
+RELEASE_LDFLAGS=''
+else
 RELEASE_LDFLAGS='-extldflags -static -s -w'
+endif
 
 # List of all binaries to build
 # We split the binaries into "agent" binaries and standard ones. This corresponds to build "agent".
@@ -324,7 +333,7 @@ $(foreach bin,$(BINARIES),$(shell basename $(bin))): build
 MARKDOWN_LINT_ALLOWLIST=localhost:8080,storage.googleapis.com/istio-artifacts/pilot/,http://ratings.default.svc.cluster.local:9080/ratings
 
 lint-helm-global:
-	find manifests -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint --strict -f manifests/charts/global.yaml
+	find manifests -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint --strict
 
 
 lint: lint-python lint-copyright-banner lint-scripts lint-go lint-dockerfiles lint-markdown lint-yaml lint-licenses lint-helm-global ## Runs all linters.
@@ -336,9 +345,6 @@ go-gen:
 	@mkdir -p /tmp/bin
 	@PATH="${PATH}":/tmp/bin go generate ./...
 
-gen-charts:
-	@operator/scripts/create_assets_gen.sh
-
 refresh-goldens:
 	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./operator/...
 	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./pkg/kube/inject/...
@@ -346,31 +352,46 @@ refresh-goldens:
 
 update-golden: refresh-goldens
 
+# Keep dummy target since some build pipelines depend on this
+gen-charts:
+	@echo "This target is no longer required and will be removed in the future"
+
 gen: mod-download-go go-gen mirror-licenses format update-crds operator-proto sync-configs-from-istiod gen-kustomize update-golden ## Update all generated code.
 
-check-no-modify:
-	@bin/check_no_modify.sh
-
-gen-check: check-no-modify gen check-clean-repo
+gen-check: gen check-clean-repo
 
 # Copy the injection template file and configmap from istiod chart to istiod-remote chart
 sync-configs-from-istiod:
 	cp manifests/charts/istio-control/istio-discovery/files/injection-template.yaml manifests/charts/istiod-remote/files/
+	cp manifests/charts/istio-control/istio-discovery/files/gateway-injection-template.yaml manifests/charts/istiod-remote/files/
+
+	# Copy over values, but apply some local customizations
+	cp manifests/charts/istio-control/istio-discovery/values.yaml manifests/charts/istiod-remote/
+	yq w manifests/charts/istiod-remote/values.yaml telemetry.enabled false -i
+	yq w manifests/charts/istiod-remote/values.yaml global.externalIstiod true -i
+
 	cp manifests/charts/istio-control/istio-discovery/templates/istiod-injector-configmap.yaml manifests/charts/istiod-remote/templates/
-	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.8.yaml manifests/charts/istiod-remote/templates/
 	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.9.yaml manifests/charts/istiod-remote/templates/
+	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.10.yaml manifests/charts/istiod-remote/templates/
 	cp manifests/charts/istio-control/istio-discovery/templates/configmap.yaml manifests/charts/istiod-remote/templates
 	cp manifests/charts/istio-control/istio-discovery/templates/mutatingwebhook.yaml manifests/charts/istiod-remote/templates
+
+	rm -r manifests/charts/gateways/istio-egress/templates
+	mkdir manifests/charts/gateways/istio-egress/templates
+	cp -r manifests/charts/gateways/istio-ingress/templates/* manifests/charts/gateways/istio-egress/templates
+	find ./manifests/charts/gateways/istio-egress/templates -type f -exec sed -i -e 's/ingress/egress/g' {} \;
+	find ./manifests/charts/gateways/istio-egress/templates -type f -exec sed -i -e 's/Ingress/Egress/g' {} \;
+
 
 # Generate kustomize templates.
 gen-kustomize:
 	helm3 template istio --namespace istio-system --include-crds manifests/charts/base > manifests/charts/base/files/gen-istio-cluster.yaml
 	helm3 template istio --namespace istio-system manifests/charts/istio-control/istio-discovery \
-		-f manifests/charts/global.yaml > manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+		> manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
 	helm3 template istiod-remote --namespace istio-system manifests/charts/istiod-remote \
-		-f manifests/charts/global.yaml > manifests/charts/istiod-remote/files/gen-istiod-remote.yaml
+		> manifests/charts/istiod-remote/files/gen-istiod-remote.yaml
 	helm3 template operator --namespace istio-system manifests/charts/istio-operator \
-		-f manifests/charts/global.yaml --set hub=gcr.io/istio-testing --set tag=${VERSION} > manifests/charts/istio-operator/files/gen-operator.yaml
+		--set hub=gcr.io/istio-testing --set tag=${VERSION} > manifests/charts/istio-operator/files/gen-operator.yaml
 
 #-----------------------------------------------------------------------------
 # Target: go build
@@ -384,7 +405,9 @@ ${ISTIO_OUT}/release/istioctl-linux-armv7: depend
 ${ISTIO_OUT}/release/istioctl-linux-arm64: depend
 	GOOS=linux GOARCH=arm64 LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $@ ./istioctl/cmd/istioctl
 ${ISTIO_OUT}/release/istioctl-osx: depend
-	GOOS=darwin LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $@ ./istioctl/cmd/istioctl
+	GOOS=darwin GOARCH=amd64 LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $@ ./istioctl/cmd/istioctl
+${ISTIO_OUT}/release/istioctl-osx-arm64: depend
+	GOOS=darwin GOARCH=arm64 LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $@ ./istioctl/cmd/istioctl
 ${ISTIO_OUT}/release/istioctl-win.exe: depend
 	GOOS=windows LDFLAGS=$(RELEASE_LDFLAGS) common/scripts/gobuild.sh $@ ./istioctl/cmd/istioctl
 
@@ -405,6 +428,7 @@ binaries-test:
 .PHONY: istioctl-all
 istioctl-all: ${ISTIO_OUT}/release/istioctl-linux-amd64 ${ISTIO_OUT}/release/istioctl-linux-armv7 ${ISTIO_OUT}/release/istioctl-linux-arm64 \
 	${ISTIO_OUT}/release/istioctl-osx \
+	${ISTIO_OUT}/release/istioctl-osx-arm64 \
 	${ISTIO_OUT}/release/istioctl-win.exe
 
 .PHONY: istioctl.completion
@@ -444,9 +468,6 @@ benchtest: $(JUNIT_REPORT) ## Runs all benchmarks
 
 report-benchtest:
 	prow/benchtest.sh report
-
-cni.install-test: docker.install-cni
-	HUB=${HUB} TAG=${TAG} go test ${GOBUILDFLAGS} -count=1 ${T} -tags=integ ./cni/test/...
 
 #-----------------------------------------------------------------------------
 # Target: clean
@@ -495,11 +516,6 @@ update-crds:
 #-----------------------------------------------------------------------------
 # deb, rpm, etc packages
 include tools/packaging/packaging.mk
-
-#-----------------------------------------------------------------------------
-# Target: e2e tests
-#-----------------------------------------------------------------------------
-include tests/istio.mk
 
 #-----------------------------------------------------------------------------
 # Target: integration tests

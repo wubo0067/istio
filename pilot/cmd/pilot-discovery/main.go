@@ -94,7 +94,6 @@ func configureLogging(_ *cobra.Command, _ []string) error {
 }
 
 func init() {
-
 	serverArgs = bootstrap.NewPilotArgs(func(p *bootstrap.PilotArgs) {
 		// Set Defaults
 		p.CtrlZOptions = ctrlz.DefaultOptions()
@@ -133,9 +132,6 @@ func init() {
 		"DNS domain suffix")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.ClusterID, "clusterID", features.ClusterName,
 		"The ID of the cluster that this Istiod instance resides")
-	// Deprecated - use mesh config
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.TrustDomain, "trust-domain", "",
-		"The domain serves to identify the system with spiffe")
 
 	// using address, so it can be configured as localhost:.. (possibly UDS in future)
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.HTTPAddr, "httpAddr", ":8080",
@@ -159,10 +155,10 @@ func init() {
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.TLSOptions.KeyFile, "tlsKeyFile", "",
 		"File containing the x509 private key matching --tlsCertFile")
 
-	discoveryCmd.PersistentFlags().Float32Var(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIQPS, "kubernetesApiQPS", 20.0,
+	discoveryCmd.PersistentFlags().Float32Var(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIQPS, "kubernetesApiQPS", 80.0,
 		"Maximum QPS when communicating with the kubernetes API")
 
-	discoveryCmd.PersistentFlags().IntVar(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIBurst, "kubernetesApiBurst", 40,
+	discoveryCmd.PersistentFlags().IntVar(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIBurst, "kubernetesApiBurst", 160,
 		"Maximum burst for throttle when communicating with the kubernetes API")
 
 	// Attach the Istio logging options to the command.
@@ -183,7 +179,6 @@ func init() {
 		Section: "pilot-discovery CLI",
 		Manual:  "Istio Pilot Discovery",
 	}))
-
 }
 
 func main() {

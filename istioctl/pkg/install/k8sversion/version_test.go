@@ -22,11 +22,6 @@ import (
 )
 
 var (
-	version1_16 = &version.Info{
-		Major:      "1",
-		Minor:      "16",
-		GitVersion: "1.16",
-	}
 	version1_17 = &version.Info{
 		Major:      "1",
 		Minor:      "17",
@@ -35,7 +30,27 @@ var (
 	version1_8 = &version.Info{
 		Major:      "1",
 		Minor:      "8",
-		GitVersion: "1.8",
+		GitVersion: "v1.8",
+	}
+	version1_18 = &version.Info{
+		Major:      "1",
+		Minor:      "18",
+		GitVersion: "v1.18.5",
+	}
+	version1_19 = &version.Info{
+		Major:      "1",
+		Minor:      "19",
+		GitVersion: "v1.19.4",
+	}
+	version1_20 = &version.Info{
+		Major:      "1",
+		Minor:      "20",
+		GitVersion: "v1.20.2",
+	}
+	version1_19RC = &version.Info{
+		Major:      "1",
+		Minor:      "19",
+		GitVersion: "v1.19.5-rc.0",
 	}
 	version1_17GKE = &version.Info{
 		Major:      "1",
@@ -67,12 +82,6 @@ func TestExtractKubernetesVersion(t *testing.T) {
 		isValid  bool
 	}{
 		{
-			version:  version1_16,
-			expected: 16,
-			errMsg:   nil,
-			isValid:  true,
-		},
-		{
 			version:  version1_17,
 			expected: 17,
 			errMsg:   nil,
@@ -81,6 +90,30 @@ func TestExtractKubernetesVersion(t *testing.T) {
 		{
 			version:  version1_8,
 			expected: 8,
+			errMsg:   nil,
+			isValid:  true,
+		},
+		{
+			version:  version1_18,
+			expected: 18,
+			errMsg:   nil,
+			isValid:  true,
+		},
+		{
+			version:  version1_19,
+			expected: 19,
+			errMsg:   nil,
+			isValid:  true,
+		},
+		{
+			version:  version1_20,
+			expected: 20,
+			errMsg:   nil,
+			isValid:  true,
+		},
+		{
+			version:  version1_19RC,
+			expected: 19,
 			errMsg:   nil,
 			isValid:  true,
 		},
@@ -98,12 +131,12 @@ func TestExtractKubernetesVersion(t *testing.T) {
 		},
 		{
 			version: versionInvalid1,
-			errMsg:  fmt.Errorf("the version %q is invalid", versionInvalid1.GitVersion),
+			errMsg:  fmt.Errorf("could not parse Malformed version: %v", versionInvalid1.GitVersion),
 			isValid: false,
 		},
 		{
 			version: versionInvalid2,
-			errMsg:  fmt.Errorf("could not parse %q as version", versionInvalid2.GitVersion),
+			errMsg:  fmt.Errorf("could not parse Malformed version: %v", versionInvalid2.GitVersion),
 			isValid: false,
 		},
 	}

@@ -62,7 +62,6 @@ func TestEmptyCluster(t *testing.T) {
 			output, err := istioctlSafe(t, istioCtl, ns.Name(), true)
 			expectNoMessages(t, g, output)
 			g.Expect(err).To(BeNil())
-
 		})
 }
 
@@ -183,7 +182,6 @@ func TestJsonInputFile(t *testing.T) {
 			output, err := istioctlSafe(t, istioCtl, ns.Name(), false, jsonGatewayFile)
 			expectMessages(t, g, output, msg.ReferencedResourceNotFound)
 			g.Expect(err).To(BeIdenticalTo(analyzerFoundIssuesError))
-
 		})
 }
 
@@ -225,7 +223,6 @@ func TestJsonOutput(t *testing.T) {
 					g.Expect(err).To(BeNil())
 				})
 			}
-
 		})
 }
 
@@ -408,7 +405,7 @@ func expectJSONMessages(t *testing.T, g *GomegaWithT, output string, expected ..
 // istioctlSafe calls istioctl analyze with certain flags set. Stdout and Stderr are merged
 func istioctlSafe(t *testing.T, i istioctl.Instance, ns string, useKube bool, extraArgs ...string) ([]string, error) {
 	output, stderr, err := istioctlWithStderr(t, i, ns, useKube, extraArgs...)
-	return strings.Split(strings.TrimSpace(output+"\n"+stderr), "\n"), err
+	return strings.Split(strings.TrimSpace(output+stderr), "\n"), err
 }
 
 func istioctlWithStderr(t *testing.T, i istioctl.Instance, ns string, useKube bool, extraArgs ...string) (string, string, error) {
@@ -430,7 +427,7 @@ func applyFileOrFail(ctx framework.TestContext, ns, filename string) {
 	if err := ctx.Clusters().Default().ApplyYAMLFiles(ns, filename); err != nil {
 		ctx.Fatal(err)
 	}
-	ctx.WhenDone(func() error {
-		return ctx.Clusters().Default().DeleteYAMLFiles(ns, filename)
+	ctx.ConditionalCleanup(func() {
+		ctx.Clusters().Default().DeleteYAMLFiles(ns, filename)
 	})
 }

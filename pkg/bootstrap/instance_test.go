@@ -39,7 +39,6 @@ import (
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
-	diff "gopkg.in/d4l3k/messagediff.v1"
 
 	"istio.io/api/annotation"
 	meshconfig "istio.io/api/mesh/v1alpha1"
@@ -239,12 +238,14 @@ func TestGolden(t *testing.T) {
 						trace.OpenCensusConfig_CLOUD_TRACE_CONTEXT,
 						trace.OpenCensusConfig_TRACE_CONTEXT,
 						trace.OpenCensusConfig_GRPC_TRACE_BIN,
-						trace.OpenCensusConfig_B3},
+						trace.OpenCensusConfig_B3,
+					},
 					OutgoingTraceContext: []trace.OpenCensusConfig_TraceContext{
 						trace.OpenCensusConfig_CLOUD_TRACE_CONTEXT,
 						trace.OpenCensusConfig_TRACE_CONTEXT,
 						trace.OpenCensusConfig_GRPC_TRACE_BIN,
-						trace.OpenCensusConfig_B3},
+						trace.OpenCensusConfig_B3,
+					},
 				}
 
 				if diff := cmp.Diff(sdMsg, want, protocmp.Transform()); diff != "" {
@@ -266,8 +267,10 @@ func TestGolden(t *testing.T) {
 				"sidecar.istio.io/statsInclusionSuffixes": "suffix1,suffix2",
 				"sidecar.istio.io/extraStatTags":          "dlp_status,dlp_error",
 			},
-			stats: stats{prefixes: "prefix1,prefix2",
-				suffixes: "suffix1,suffix2"},
+			stats: stats{
+				prefixes: "prefix1,prefix2",
+				suffixes: "suffix1,suffix2",
+			},
 		},
 		{
 			base: "stats_inclusion",
@@ -276,7 +279,8 @@ func TestGolden(t *testing.T) {
 				"sidecar.istio.io/extraStatTags":          "dlp_status,dlp_error",
 			},
 			stats: stats{
-				suffixes: upstreamStatsSuffixes + "," + downstreamStatsSuffixes},
+				suffixes: upstreamStatsSuffixes + "," + downstreamStatsSuffixes,
+			},
 		},
 		{
 			base: "stats_inclusion",
@@ -329,7 +333,8 @@ func TestGolden(t *testing.T) {
 					meta: c.platformMeta,
 				},
 				PilotSubjectAltName: []string{
-					"spiffe://cluster.local/ns/istio-system/sa/istio-pilot-service-account"},
+					"spiffe://cluster.local/ns/istio-system/sa/istio-pilot-service-account",
+				},
 				LocalEnv:          localEnv,
 				NodeIPs:           []string{"10.3.3.3", "10.4.4.4", "10.5.5.5", "10.6.6.6", "10.4.4.4"},
 				OutlierLogPath:    "/dev/stdout",
@@ -374,7 +379,6 @@ func TestGolden(t *testing.T) {
 			goldenM := &bootstrap.Bootstrap{}
 
 			jgolden, err := yaml.YAMLToJSON(golden)
-
 			if err != nil {
 				t.Fatalf("unable to convert: %s %v", c.base, err)
 			}
@@ -468,9 +472,8 @@ func checkOpencensusConfig(t *testing.T, got, want *bootstrap.Bootstrap) {
 		return
 	}
 
-	if !reflect.DeepEqual(got.Tracing.Http, want.Tracing.Http) {
-		p, _ := diff.PrettyDiff(got.Tracing.Http, want.Tracing.Http)
-		t.Fatalf("t diff: %v\ngot:\n %v\nwant:\n %v\n", p, got.Tracing.Http, want.Tracing.Http)
+	if diff := cmp.Diff(got.Tracing.Http, want.Tracing.Http, protocmp.Transform()); diff != "" {
+		t.Fatalf("t diff: %v\ngot:\n %v\nwant:\n %v\n", diff, got.Tracing.Http, want.Tracing.Http)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"istio.io/istio/pilot/pkg/features"
+	"istio.io/istio/pilot/pkg/serviceregistry"
 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/testcerts"
@@ -175,11 +176,18 @@ func TestNewServer(t *testing.T) {
 		domain         string
 		expectedDomain string
 		secureGRPCport string
+		jwtRule        string
 	}{
 		{
 			name:           "default domain",
 			domain:         "",
 			expectedDomain: constants.DefaultKubernetesDomain,
+		},
+		{
+			name:           "default domain with JwtRule",
+			domain:         "",
+			expectedDomain: constants.DefaultKubernetesDomain,
+			jwtRule:        `{"issuer": "foo", "jwks_uri": "baz", "audiences": ["aud1", "aud2"]}`,
 		},
 		{
 			name:           "override domain",
@@ -224,6 +232,8 @@ func TestNewServer(t *testing.T) {
 				// Include all of the default plugins
 				p.Plugins = DefaultPlugins
 				p.ShutdownDuration = 1 * time.Millisecond
+
+				p.JwtRule = c.jwtRule
 			})
 
 			g := NewWithT(t)
@@ -238,6 +248,110 @@ func TestNewServer(t *testing.T) {
 			}()
 
 			g.Expect(s.environment.GetDomainSuffix()).To(Equal(c.expectedDomain))
+		})
+	}
+}
+
+func TestNewServerWithMockRegistry(t *testing.T) {
+	cases := []struct {
+		name             string
+		registry         string
+		expectedRegistry serviceregistry.ProviderID
+		secureGRPCport   string
+	}{
+		{
+			name:             "Mock Registry",
+			registry:         "Mock",
+			expectedRegistry: serviceregistry.Mock,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			configDir, err := ioutil.TempDir("", "TestNewServer")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer func() {
+				_ = os.RemoveAll(configDir)
+			}()
+
+			args := NewPilotArgs(func(p *PilotArgs) {
+				p.Namespace = "istio-system"
+
+				// As the same with args in main go of pilot-discovery
+				p.InjectionOptions = InjectionOptions{
+					InjectionDirectory: "./var/lib/istio/inject",
+				}
+
+				p.ServerOptions = DiscoveryServerOptions{
+					// Dynamically assign all ports.
+					HTTPAddr:       ":0",
+					MonitoringAddr: ":0",
+					GRPCAddr:       ":0",
+					SecureGRPCAddr: c.secureGRPCport,
+				}
+
+				p.RegistryOptions = RegistryOptions{
+					Registries: []string{c.registry},
+					FileDir:    configDir,
+				}
+
+				// Include all of the default plugins
+				p.Plugins = DefaultPlugins
+				p.ShutdownDuration = 1 * time.Millisecond
+			})
+
+			g := NewWithT(t)
+			s, err := NewServer(args)
+			g.Expect(err).To(Succeed())
+
+			stop := make(chan struct{})
+			g.Expect(s.Start(stop)).To(Succeed())
+			defer func() {
+				close(stop)
+				s.WaitUntilCompletion()
+			}()
+
+			g.Expect(s.ServiceController().GetRegistries()[1].Provider()).To(Equal(c.expectedRegistry))
+		})
+	}
+}
+
+func TestInitOIDC(t *testing.T) {
+	tests := []struct {
+		name      string
+		expectErr bool
+		jwtRule   string
+	}{
+		{
+			name:      "valid jwt rule",
+			expectErr: false,
+			jwtRule:   `{"issuer": "foo", "jwks_uri": "baz", "audiences": ["aud1", "aud2"]}`,
+		},
+		{
+			name:      "invalid jwt rule",
+			expectErr: true,
+			jwtRule:   "invalid",
+		},
+		{
+			name:      "jwt rule with invalid audiences",
+			expectErr: true,
+			// audiences must be a string array
+			jwtRule: `{"issuer": "foo", "jwks_uri": "baz", "audiences": "aud1"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := &PilotArgs{JwtRule: tt.jwtRule}
+
+			_, err := initOIDC(args, "domain-foo")
+			gotErr := err != nil
+			if gotErr != tt.expectErr {
+				t.Errorf("expect error is %v while actual error is %v", tt.expectErr, gotErr)
+			}
 		})
 	}
 }

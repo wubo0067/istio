@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -61,6 +62,8 @@ const (
 	finalizer = "istio-finalizer.install.istio.io"
 	// finalizerMaxRetries defines the maximum number of attempts to remove the finalizer.
 	finalizerMaxRetries = 1
+	// IgnoreReconcileAnnotation is annotation of IstioOperator CR so it would be ignored during Reconcile loop.
+	IgnoreReconcileAnnotation = "install.istio.io/ignoreReconcile"
 )
 
 var (
@@ -75,10 +78,8 @@ var (
 	watchedResources = []schema.GroupVersionKind{
 		{Group: "autoscaling", Version: "v2beta1", Kind: name.HPAStr},
 		{Group: "policy", Version: "v1beta1", Kind: name.PDBStr},
-		{Group: "apps", Version: "v1", Kind: name.StatefulSetStr},
 		{Group: "apps", Version: "v1", Kind: name.DeploymentStr},
 		{Group: "apps", Version: "v1", Kind: name.DaemonSetStr},
-		{Group: "extensions", Version: "v1beta1", Kind: name.IngressStr},
 		{Group: "", Version: "v1", Kind: name.ServiceStr},
 		// Endpoints should not be pruned because these are generated and not in the manifest.
 		// {Group: "", Version: "v1", Kind: name.EndpointStr},
@@ -189,7 +190,7 @@ type ReconcileIstioOperator struct {
 // Note:
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileIstioOperator) Reconcile(_ context.Context, request reconcile.Request) (reconcile.Result, error) {
 	scope.Info("Reconciling IstioOperator")
 
 	ns, iopName := request.Namespace, request.Name
@@ -218,6 +219,19 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 	operatorRevision, _ := os.LookupEnv("REVISION")
 	if operatorRevision != "" && operatorRevision != iop.Spec.Revision {
 		scope.Infof("Ignoring IstioOperator CR %s with revision %s, since operator revision is %s.", iopName, iop.Spec.Revision, operatorRevision)
+		return reconcile.Result{}, nil
+	}
+	if iop.Annotations != nil {
+		if ir := iop.Annotations[IgnoreReconcileAnnotation]; ir == "true" {
+			scope.Infof("Ignoring the IstioOperator CR %s because it is annotated to be ignored for reconcile ", iopName)
+			return reconcile.Result{}, nil
+		}
+	}
+
+	// for backward compatibility, the previous applied installed-state CR does not have the ignore reconcile annotation
+	// TODO(richardwxn): remove this check and rely on annotation check only
+	if strings.HasPrefix(iop.Name, name.InstalledSpecCRPrefix) {
+		scope.Infof("Ignoring the installed-state IstioOperator CR %s ", iopName)
 		return reconcile.Result{}, nil
 	}
 
@@ -308,6 +322,15 @@ func (r *ReconcileIstioOperator) Reconcile(request reconcile.Request) (reconcile
 				"See " + url.ConfigureSAToken + " for details.")
 		}
 		globalValues["jwtPolicy"] = string(jwtPolicy)
+	}
+	client, err := kubernetes.NewForConfig(r.config)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	err = util.ValidateIOPCAConfig(client, iopMerged)
+	if err != nil {
+		scope.Errorf(errdict.OperatorFailedToConfigure, "failed to apply IstioOperator resources. Error %s", err)
+		return reconcile.Result{}, err
 	}
 	reconciler, err := helmreconciler.NewHelmReconciler(r.client, r.config, iopMerged, nil)
 	if err != nil {
@@ -407,7 +430,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
-	//watch for changes to Istio resources
+	// watch for changes to Istio resources
 	err = watchIstioResources(c)
 	if err != nil {
 		return err
@@ -425,17 +448,16 @@ func watchIstioResources(c controller.Controller) error {
 			Group:   t.Group,
 			Version: t.Version,
 		})
-		err := c.Watch(&source.Kind{Type: u}, &handler.EnqueueRequestsFromMapFunc{
-			ToRequests: handler.ToRequestsFunc(func(a handler.MapObject) []reconcile.Request {
-				scope.Infof("Watching a change for istio resource: %s/%s", a.Meta.GetNamespace(), a.Meta.GetName())
-				return []reconcile.Request{
-					{NamespacedName: types.NamespacedName{
-						Name:      a.Meta.GetLabels()[helmreconciler.OwningResourceName],
-						Namespace: a.Meta.GetLabels()[helmreconciler.OwningResourceNamespace],
-					}},
-				}
-			}),
-		}, ownedResourcePredicates)
+		err := c.Watch(&source.Kind{Type: u}, handler.EnqueueRequestsFromMapFunc(func(a client.Object) []reconcile.Request {
+			scope.Infof("Watching a change for istio resource: %s/%s", a.GetNamespace(), a.GetName())
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{
+					Name:      a.GetLabels()[helmreconciler.OwningResourceName],
+					Namespace: a.GetLabels()[helmreconciler.OwningResourceNamespace],
+				}},
+			}
+		}),
+			ownedResourcePredicates)
 		if err != nil {
 			scope.Errorf("Could not create watch for %s/%s/%s: %s.", t.Kind, t.Group, t.Version, err)
 		}

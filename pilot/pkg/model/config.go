@@ -30,10 +30,8 @@ import (
 	"istio.io/istio/pkg/config/schema/gvk"
 )
 
-var (
-	// Statically link protobuf descriptors from UDPA
-	_ = udpa.TypedStruct{}
-)
+// Statically link protobuf descriptors from UDPA
+var _ = udpa.TypedStruct{}
 
 // ConfigKey describe a specific config item.
 // In most cases, the name is the config's name. However, for ServiceEntry it is service's FQDN.
@@ -135,10 +133,12 @@ type ConfigStore interface {
 
 	// Patch applies only the modifications made in the PatchFunc rather than doing a full replace. Useful to avoid
 	// read-modify-write conflicts when there are many concurrent-writers to the same resource.
-	Patch(typ config.GroupVersionKind, name, namespace string, patchFn config.PatchFunc) (string, error)
+	Patch(orig config.Config, patchFn config.PatchFunc) (string, error)
 
 	// Delete removes an object from the store by key
-	Delete(typ config.GroupVersionKind, name, namespace string) error
+	// For k8s, resourceVersion must be fulfilled before a deletion is carried out.
+	// If not possible, a 409 Conflict status will be returned.
+	Delete(typ config.GroupVersionKind, name, namespace string, resourceVersion *string) error
 }
 
 // ConfigStoreCache is a local fully-replicated cache of the config store.  The

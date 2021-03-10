@@ -18,16 +18,24 @@ package pilot
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"path/filepath"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"istio.io/istio/pkg/config/protocol"
+	"istio.io/istio/pkg/test/echo/common/scheme"
+	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
+	kubecluster "istio.io/istio/pkg/test/framework/components/cluster/kube"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/components/namespace"
+	"istio.io/istio/pkg/test/helm"
 	"istio.io/istio/pkg/test/util/retry"
+	helmtest "istio.io/istio/tests/integration/helm"
 	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
 )
 
@@ -87,6 +95,31 @@ spec:
   - forwardTo:
      - serviceName: b
        port: 80
+---
+apiVersion: networking.x-k8s.io/v1alpha1
+kind: HTTPRoute
+metadata:
+  name: b
+spec:
+  gateways:
+    allow: FromList
+    gatewayRefs:
+      - name: mesh
+        namespace: istio-system
+  hostnames: ["b"]
+  rules:
+  - matches:
+    - path:
+        type: Prefix
+        value: /path
+    filters:
+    - type: RequestHeaderModifier
+      requestHeaderModifier:
+        add:
+          my-added-header: added-value
+    forwardTo:
+    - serviceName: b
+      port: 80
 `)
 
 			ctx.NewSubTest("http").Run(func(ctx framework.TestContext) {
@@ -116,16 +149,19 @@ spec:
 					Validator: echo.ExpectOK(),
 				})
 			})
+			ctx.NewSubTest("mesh").Run(func(ctx framework.TestContext) {
+				_ = apps.PodA[0].CallWithRetryOrFail(ctx, echo.CallOptions{
+					Target:    apps.PodB[0],
+					PortName:  "http",
+					Path:      "/path",
+					Validator: echo.And(echo.ExpectOK(), echo.ExpectKey("My-Added-Header", "added-value")),
+				})
+			})
 		})
 }
 
 func skipIfIngressClassUnsupported(ctx framework.TestContext) {
-	ver, err := ctx.Clusters().Default().GetKubernetesVersion()
-	if err != nil {
-		ctx.Fatalf("failed to get Kubernetes version: %v", err)
-	}
-	serverVersion := fmt.Sprintf("%s.%s", ver.Major, ver.Minor)
-	if serverVersion < "1.18" {
+	if !ctx.Clusters().Default().MinKubeVersion(1, 18) {
 		ctx.Skip("IngressClass not supported")
 	}
 }
@@ -143,15 +179,13 @@ func TestIngress(t *testing.T) {
 			// we will define one for foo.example.com and one for bar.example.com, to ensure both can co-exist
 			credName := "k8s-ingress-secret-foo"
 			ingressutil.CreateIngressKubeSecret(ctx, []string{credName}, ingressutil.TLS, ingressutil.IngressCredentialA, false)
-			ctx.WhenDone(func() error {
+			ctx.ConditionalCleanup(func() {
 				ingressutil.DeleteKubeSecret(ctx, []string{credName})
-				return nil
 			})
 			credName2 := "k8s-ingress-secret-bar"
 			ingressutil.CreateIngressKubeSecret(ctx, []string{credName2}, ingressutil.TLS, ingressutil.IngressCredentialB, false)
-			ctx.WhenDone(func() error {
+			ctx.ConditionalCleanup(func() {
 				ingressutil.DeleteKubeSecret(ctx, []string{credName2})
-				return nil
 			})
 
 			ingressClassConfig := `
@@ -263,13 +297,13 @@ spec:
 				})
 			}
 
-			t.Run("status", func(t *testing.T) {
+			ctx.NewSubTest("status").Run(func(ctx framework.TestContext) {
 				if !ctx.Environment().(*kube.Environment).Settings().LoadBalancerSupported {
-					t.Skip("ingress status not supported without load balancer")
+					ctx.Skip("ingress status not supported without load balancer")
 				}
 
 				ip := apps.Ingress.HTTPAddress().IP.String()
-				retry.UntilSuccessOrFail(t, func() error {
+				retry.UntilSuccessOrFail(ctx, func() error {
 					ing, err := ctx.Clusters().Default().NetworkingV1beta1().Ingresses(apps.Namespace.Name()).Get(context.Background(), "ingress", metav1.GetOptions{})
 					if err != nil {
 						return err
@@ -279,7 +313,6 @@ spec:
 					}
 					return nil
 				}, retry.Delay(time.Second*5), retry.Timeout(time.Second*90))
-
 			})
 
 			// setup another ingress pointing to a different route; the ingress will have an ingress class that should be targeted at first
@@ -351,6 +384,159 @@ spec:
 					apps.Ingress.CallEchoWithRetryOrFail(ctx, c.call, retry.Timeout(time.Minute))
 				})
 			}
+		})
+}
 
+// TestCustomGateway deploys a simple gateway deployment, that is fully injected, and verifies it can startup and send traffic
+func TestCustomGateway(t *testing.T) {
+	framework.
+		NewTest(t).
+		Features("traffic.ingress.custom").
+		Run(func(ctx framework.TestContext) {
+			gatewayNs := namespace.NewOrFail(t, ctx, namespace.Config{Prefix: "custom-gateway"})
+			injectLabel := `sidecar.istio.io/inject: "true"`
+			if len(ctx.Settings().Revision) > 0 {
+				injectLabel = fmt.Sprintf(`istio.io/rev: "%v"`, ctx.Settings().Revision)
+			}
+			ctx.NewSubTest("minimal").Run(func(ctx framework.TestContext) {
+				ctx.Config().ApplyYAMLOrFail(t, gatewayNs.Name(), fmt.Sprintf(`apiVersion: v1
+kind: Service
+metadata:
+  name: custom-gateway
+  labels:
+    istio: custom
+spec:
+  ports:
+  - port: 80
+    name: http
+  selector:
+    istio: custom
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-gateway
+spec:
+  selector:
+    matchLabels:
+      istio: custom
+  template:
+    metadata:
+      annotations:
+        inject.istio.io/templates: gateway
+      labels:
+        istio: custom
+        %v
+    spec:
+      containers:
+      - name: istio-proxy
+        image: auto
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: app
+spec:
+  selector:
+    istio: custom
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - app
+  http:
+  - route:
+    - destination:
+        host: %s
+        port:
+          number: 80
+`, injectLabel, apps.PodA[0].Config().FQDN()))
+				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
+					Port:      &echo.Port{ServicePort: 80},
+					Scheme:    scheme.HTTP,
+					Address:   fmt.Sprintf("custom-gateway.%s.svc.cluster.local", gatewayNs.Name()),
+					Validator: echo.ExpectOK(),
+				})
+			})
+			// TODO we could add istioctl as well, but the framework adds a bunch of stuff beyond just `istioctl install`
+			// that mess with certs, multicluster, etc
+			ctx.NewSubTest("helm").Run(func(ctx framework.TestContext) {
+				d := filepath.Join(t.TempDir(), "gateway-values.yaml")
+				rev := ""
+				if len(ctx.Settings().Revision) > 0 {
+					rev = ctx.Settings().Revision
+				}
+				ioutil.WriteFile(d, []byte(fmt.Sprintf(`
+revision: %v
+gateways:
+  istio-ingressgateway:
+    name: custom-gateway-helm
+    injectionTemplate: gateway
+    type: ClusterIP # LoadBalancer is slow and not necessary for this tests
+    autoscaleMax: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 40Mi
+    labels:
+      istio: custom-gateway-helm
+`, rev)), 0o644)
+				cs := ctx.Clusters().Default().(*kubecluster.Cluster)
+				h := helm.New(cs.Filename(), filepath.Join(env.IstioSrc, "manifests/charts"))
+				// Install ingress gateway chart
+				if err := h.InstallChart("ingress", filepath.Join("gateways/istio-ingress"), gatewayNs.Name(),
+					d, helmtest.HelmTimeout); err != nil {
+					ctx.Fatal(err)
+				}
+				ctx.Config().ApplyYAMLOrFail(ctx, gatewayNs.Name(), fmt.Sprintf(`apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: app
+spec:
+  selector:
+    istio: custom-gateway-helm
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - app
+  http:
+  - route:
+    - destination:
+        host: %s
+        port:
+          number: 80
+`, apps.PodA[0].Config().FQDN()))
+				apps.PodB[0].CallWithRetryOrFail(ctx, echo.CallOptions{
+					Port:      &echo.Port{ServicePort: 80},
+					Scheme:    scheme.HTTP,
+					Address:   fmt.Sprintf("custom-gateway-helm.%s.svc.cluster.local", gatewayNs.Name()),
+					Validator: echo.ExpectOK(),
+				})
+			})
 		})
 }

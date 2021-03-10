@@ -20,6 +20,7 @@ import (
 	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
 
 	"istio.io/istio/pkg/test"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	edgespb "istio.io/istio/pkg/test/framework/components/stackdriver/edges"
 	"istio.io/istio/pkg/test/framework/resource"
 )
@@ -30,14 +31,14 @@ type Instance interface {
 	// Gets the namespace in which stackdriver is deployed.
 	GetStackdriverNamespace() string
 	ListTimeSeries() ([]*monitoringpb.TimeSeries, error)
-	ListLogEntries() ([]*loggingpb.LogEntry, error)
+	ListLogEntries(LogType) ([]*loggingpb.LogEntry, error)
 	ListTrafficAssertions() ([]*edgespb.TrafficAssertion, error)
 	ListTraces() ([]*cloudtracepb.Trace, error)
 }
 
 type Config struct {
 	// Cluster to be used in a multicluster environment
-	Cluster resource.Cluster
+	Cluster cluster.Cluster
 }
 
 // New returns a new instance of stackdriver.

@@ -41,6 +41,7 @@ var (
 	SidecarVolumeMount           = workloadAnnotation(annotation.SidecarUserVolumeMount.Name, "")
 	SidecarVolume                = workloadAnnotation(annotation.SidecarUserVolume.Name, "")
 	SidecarConfig                = workloadAnnotation(annotation.ProxyConfig.Name, "")
+	SidecarInterceptionMode      = workloadAnnotation(annotation.SidecarInterceptionMode.Name, "REDIRECT")
 )
 
 type AnnotationValue struct {
@@ -115,6 +116,15 @@ func (a Annotations) getOrDefault(k Annotation) *AnnotationValue {
 		anno = &k.Default
 	}
 	return anno
+}
+
+func (a Annotations) GetByName(k string) string {
+	for keys := range a {
+		if keys.Name == k {
+			return a.Get(keys)
+		}
+	}
+	return ""
 }
 
 func (a Annotations) Get(k Annotation) string {

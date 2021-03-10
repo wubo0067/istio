@@ -17,14 +17,18 @@ package xds
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path"
 	"testing"
 	"text/template"
 	"time"
 
 	"github.com/Masterminds/sprig/v3"
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/golang/protobuf/jsonpb"
+	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -37,7 +41,9 @@ import (
 	"istio.io/istio/pilot/test/xdstest"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/spiffe"
+	"istio.io/istio/pkg/test/util/yml"
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
 )
@@ -87,6 +93,14 @@ var testCases = []ConfigInput{
 		Name:     "virtualservice",
 		Services: 100,
 	},
+	{
+		Name:     "authorizationpolicy",
+		Services: 100,
+	},
+	{
+		Name:     "peerauthentication",
+		Services: 100,
+	},
 }
 
 func disableLogging() {
@@ -125,7 +139,7 @@ func BenchmarkRouteGeneration(b *testing.B) {
 			b.ResetTimer()
 			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c = s.Discovery.Generators[v3.RouteType].Generate(proxy, s.PushContext(), &model.WatchedResource{ResourceNames: routeNames}, nil)
+				c, _ = s.Discovery.Generators[v3.RouteType].Generate(proxy, s.PushContext(), &model.WatchedResource{ResourceNames: routeNames}, nil)
 				if len(c) == 0 {
 					b.Fatal("Got no routes!")
 				}
@@ -133,6 +147,28 @@ func BenchmarkRouteGeneration(b *testing.B) {
 			logDebug(b, c)
 		})
 	}
+}
+
+// Do a quick sanity tests to make sure telemetry v2 filters are applying. This ensures as they
+// update our benchmark doesn't become useless.
+func TestValidateTelemetry(t *testing.T) {
+	s, proxy := setupAndInitializeTest(t, ConfigInput{Name: "telemetry", Services: 1})
+	c, _ := s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, nil)
+	if len(c) == 0 {
+		t.Fatal("Got no clusters!")
+	}
+	for _, r := range c {
+		cls := &cluster.Cluster{}
+		if err := ptypes.UnmarshalAny(r, cls); err != nil {
+			t.Fatal(err)
+		}
+		for _, ff := range cls.Filters {
+			if ff.Name == "istio.metadata_exchange" {
+				return
+			}
+		}
+	}
+	t.Fatalf("telemetry v2 filters not found")
 }
 
 func BenchmarkClusterGeneration(b *testing.B) {
@@ -143,7 +179,7 @@ func BenchmarkClusterGeneration(b *testing.B) {
 			b.ResetTimer()
 			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c = s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, nil)
+				c, _ = s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, nil)
 				if len(c) == 0 {
 					b.Fatal("Got no clusters!")
 				}
@@ -161,7 +197,7 @@ func BenchmarkListenerGeneration(b *testing.B) {
 			b.ResetTimer()
 			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c = s.Discovery.Generators[v3.ListenerType].Generate(proxy, s.PushContext(), nil, nil)
+				c, _ = s.Discovery.Generators[v3.ListenerType].Generate(proxy, s.PushContext(), nil, nil)
 				if len(c) == 0 {
 					b.Fatal("Got no listeners!")
 				}
@@ -179,7 +215,7 @@ func BenchmarkNameTableGeneration(b *testing.B) {
 			b.ResetTimer()
 			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c = s.Discovery.Generators[v3.NameTableType].Generate(proxy, s.PushContext(), nil, nil)
+				c, _ = s.Discovery.Generators[v3.NameTableType].Generate(proxy, s.PushContext(), nil, nil)
 				if len(c) == 0 && tt.ProxyType != model.Router {
 					b.Fatal("Got no name tables!")
 				}
@@ -222,7 +258,7 @@ func BenchmarkSecretGeneration(b *testing.B) {
 			b.ResetTimer()
 			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c = gen.Generate(proxy, s.PushContext(), res, &model.PushRequest{Full: true})
+				c, _ = gen.Generate(proxy, s.PushContext(), res, &model.PushRequest{Full: true})
 				if len(c) == 0 {
 					b.Fatal("Got no secrets!")
 				}
@@ -268,7 +304,7 @@ func BenchmarkEndpointGeneration(b *testing.B) {
 					l := s.Discovery.generateEndpoints(NewEndpointBuilder(fmt.Sprintf("outbound|80||foo-%d.com", svc), proxy, push))
 					loadAssignments = append(loadAssignments, util.MessageToAny(l))
 				}
-				response = endpointDiscoveryResponse(loadAssignments, version, push.Version)
+				response = endpointDiscoveryResponse(loadAssignments, version, push.LedgerVersion)
 			}
 			logDebug(b, response.GetResources())
 		})
@@ -292,16 +328,17 @@ func setupTest(t testing.TB, config ConfigInput) (*FakeDiscoveryServer, *model.P
 			Labels: map[string]string{
 				"istio.io/benchmark": "true",
 			},
-			IstioVersion: "1.9.0",
+			IstioVersion: "1.10.0",
 		},
-		// TODO: if you update this, make sure telemetry.yaml is also updated
-		IstioVersion:    &model.IstioVersion{Major: 1, Minor: 6},
 		ConfigNamespace: "default",
 	}
+	proxy.IstioVersion = model.ParseIstioVersion(proxy.Metadata.IstioVersion)
 
 	configs := getConfigsWithCache(t, config)
 	s := NewFakeDiscoveryServer(t, FakeOptions{
 		Configs: configs,
+		// Allow debounce to avoid overwhelming with writes
+		DebounceTime: time.Millisecond * 10,
 	})
 
 	return s, proxy
@@ -324,7 +361,18 @@ func getConfigsWithCache(t testing.TB, input ConfigInput) []config.Config {
 	if err := tmpl.ExecuteTemplate(&buf, configName+".yaml", input); err != nil {
 		t.Fatalf("failed to execute template: %v", err)
 	}
-	configs, badKinds, err := crd.ParseInputs(buf.String())
+	extra := path.Join("testdata", "benchmarks", configName+".extra.yaml")
+	inputYAML := buf.String()
+	if _, err := os.Stat(extra); err == nil {
+		bdata, err := ioutil.ReadFile(extra)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		inputYAML += "\n---\n" + yml.SplitYamlByKind(string(bdata))[gvk.EnvoyFilter.Kind]
+	}
+
+	configs, badKinds, err := crd.ParseInputs(inputYAML)
 	if err != nil {
 		t.Fatalf("failed to read config: %v", err)
 	}

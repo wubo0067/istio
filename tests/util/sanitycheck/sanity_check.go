@@ -28,6 +28,11 @@ import (
 // RunTrafficTest deploys echo server/client and runs an Istio traffic test
 func RunTrafficTest(t *testing.T, ctx resource.Context) {
 	scopes.Framework.Infof("running sanity test")
+	client, server := SetupTrafficTest(t, ctx)
+	RunTrafficTestClientServer(t, client, server)
+}
+
+func SetupTrafficTest(t *testing.T, ctx resource.Context) (echo.Instance, echo.Instance) {
 	var client, server echo.Instance
 	test := namespace.NewOrFail(t, ctx, namespace.Config{
 		Prefix: "default",
@@ -47,9 +52,15 @@ func RunTrafficTest(t *testing.T, ctx resource.Context) {
 					Name:         "http",
 					Protocol:     protocol.HTTP,
 					InstancePort: 8090,
-				}},
+				},
+			},
 		}).
 		BuildOrFail(t)
+
+	return client, server
+}
+
+func RunTrafficTestClientServer(t *testing.T, client, server echo.Instance) {
 	_ = client.CallWithRetryOrFail(t, echo.CallOptions{
 		Target:    server,
 		PortName:  "http",

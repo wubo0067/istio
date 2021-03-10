@@ -22,7 +22,7 @@ import (
 
 	"istio.io/istio/pkg/test/echo/client"
 	"istio.io/istio/pkg/test/echo/common/scheme"
-	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 )
 
 // CallOptions defines options for calling a Endpoint.
@@ -70,6 +70,10 @@ type CallOptions struct {
 	// Use the custom certificate to make the call. This is mostly used to make mTLS request directly
 	// (without proxy) from naked client to test certificates issued by custom CA instead of the Istio self-signed CA.
 	Cert, Key, CaCert string
+
+	// FollowRedirects will instruct the call to follow 301 redirects. Otherwise, the original 301 response
+	// is returned directly.
+	FollowRedirects bool
 
 	// Validator for server responses. If no validator is provided, only the number of responses received
 	// will be verified.
@@ -141,7 +145,7 @@ func ExpectOK() Validator {
 }
 
 // ExpectReachedClusters returns a Validator that checks that all provided clusters are reached.
-func ExpectReachedClusters(clusters resource.Clusters) Validator {
+func ExpectReachedClusters(clusters cluster.Clusters) Validator {
 	return ValidatorFunc(func(responses client.ParsedResponses, _ error) error {
 		return responses.CheckReachedClusters(clusters)
 	})
@@ -151,6 +155,13 @@ func ExpectReachedClusters(clusters resource.Clusters) Validator {
 func ExpectCluster(expected string) Validator {
 	return ValidatorFunc(func(responses client.ParsedResponses, _ error) error {
 		return responses.CheckCluster(expected)
+	})
+}
+
+// ExpectKey returns a validator that checks a key matches the provided value
+func ExpectKey(key, expected string) Validator {
+	return ValidatorFunc(func(responses client.ParsedResponses, _ error) error {
+		return responses.CheckKey(key, expected)
 	})
 }
 

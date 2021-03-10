@@ -42,14 +42,12 @@ const (
 	readyInterval = 2 * time.Second
 )
 
-var (
-	webSocketUpgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			// allow all connections by default
-			return true
-		},
-	}
-)
+var webSocketUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		// allow all connections by default
+		return true
+	},
+}
 
 var _ Instance = &httpInstance{}
 
@@ -87,7 +85,17 @@ func (s *httpInstance) Start(onReady OnReadyFunc) error {
 		if cerr != nil {
 			return fmt.Errorf("could not load TLS keys: %v", cerr)
 		}
-		config := &tls.Config{Certificates: []tls.Certificate{cert}}
+		config := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{"h2", "http/1.1", "http/1.0"},
+			GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+				// There isn't a way to pass through all ALPNs presented by the client down to the
+				// HTTP server to return in the response. However, for debugging, we can at least log
+				// them at this level.
+				epLog.Infof("TLS connection with alpn: %v", info.SupportedProtos)
+				return nil, nil
+			},
+		}
 		// Listen on the given port and update the port if it changed from what was passed in.
 		listener, port, err = listenOnAddressTLS(s.ListenerIP, s.Port.Port, config)
 		// Store the actual listening port back to the argument.
@@ -193,7 +201,11 @@ type codeAndSlices struct {
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	epLog.Infof("HTTP Request:\n  Method: %s\n  URL: %v,\n  Host: %s\n  Headers: %v",
 		r.Method, r.URL, r.Host, r.Header)
-	defer common.Metrics.HTTPRequests.With(common.PortLabel.Value(strconv.Itoa(h.Port.Port))).Increment()
+	if h.Port == nil {
+		defer common.Metrics.HTTPRequests.With(common.PortLabel.Value("uds")).Increment()
+	} else {
+		defer common.Metrics.HTTPRequests.With(common.PortLabel.Value(strconv.Itoa(h.Port.Port))).Increment()
+	}
 	if !h.IsServerReady() {
 		// Handle readiness probe failure.
 		epLog.Infof("HTTP service not ready, returning 503")
@@ -295,7 +307,16 @@ func (h *httpHandler) addResponsePayload(r *http.Request, body *bytes.Buffer) {
 
 	writeField(body, "Method", r.Method)
 	writeField(body, "Proto", r.Proto)
-	writeField(body, "RemoteAddr", r.RemoteAddr)
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	writeField(body, response.IPField, ip)
+
+	// Note: since this is the NegotiatedProtocol, it will be set to empty if the client sends an ALPN
+	// not supported by the server (ie one of h2,http/1.1,http/1.0)
+	var alpn string
+	if r.TLS != nil {
+		alpn = r.TLS.NegotiatedProtocol
+	}
+	writeField(body, "Alpn", alpn)
 
 	keys := []string{}
 	for k := range r.Header {
@@ -313,6 +334,7 @@ func (h *httpHandler) addResponsePayload(r *http.Request, body *bytes.Buffer) {
 		writeField(body, response.HostnameField, hostname)
 	}
 }
+
 func delayResponse(request *http.Request) error {
 	d := request.FormValue("delay")
 	if len(d) == 0 {
@@ -355,7 +377,7 @@ func setResponseFromCodes(request *http.Request, response http.ResponseWriter) e
 	}
 
 	// Choose a random "slice" from a pie
-	var totalSlices = 0
+	totalSlices := 0
 	for _, flavor := range codes {
 		totalSlices += flavor.slices
 	}

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/ghodss/yaml"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"istio.io/api/operator/v1alpha1"
@@ -42,10 +43,8 @@ import (
 	pkgversion "istio.io/pkg/version"
 )
 
-var (
-	// installerScope is the scope for shared manifest package.
-	installerScope = log.RegisterScope("installer", "installer", 0)
-)
+// installerScope is the scope for shared manifest package.
+var installerScope = log.RegisterScope("installer", "installer", 0)
 
 // GenManifests generates a manifest map, keyed by the component name, from input file list and a YAML tree
 // representation of path-values passed through the --set flag.
@@ -102,7 +101,6 @@ func GenerateConfig(inFilenames []string, setFlags []string, force bool, kubeCon
 	}
 
 	iopsString, iops, err := GenIOPFromProfile(profile, fy, setFlags, force, false, kubeConfig, l)
-
 	if err != nil {
 		return "", nil, err
 	}
@@ -122,12 +120,11 @@ func GenerateConfig(inFilenames []string, setFlags []string, force bool, kubeCon
 // files and the --set flag. If successful, it returns an IstioOperator string and struct.
 func GenIOPFromProfile(profileOrPath, fileOverlayYAML string, setFlags []string, skipValidation, allowUnknownField bool,
 	kubeConfig *rest.Config, l clog.Logger) (string, *iopv1alpha1.IstioOperator, error) {
-
 	installPackagePath, err := getInstallPackagePath(fileOverlayYAML)
 	if err != nil {
 		return "", nil, err
 	}
-	if sfp := getValueForSetFlag(setFlags, "installPackagePath"); sfp != "" {
+	if sfp := GetValueForSetFlag(setFlags, "installPackagePath"); sfp != "" {
 		// set flag installPackagePath has the highest precedence, if set.
 		installPackagePath = sfp
 	}
@@ -192,6 +189,18 @@ func GenIOPFromProfile(profileOrPath, fileOverlayYAML string, setFlags []string,
 	if err != nil {
 		return "", nil, err
 	}
+
+	// Validate Final IOP config against K8s cluster
+	if kubeConfig != nil {
+		client, err := kubernetes.NewForConfig(kubeConfig)
+		if err != nil {
+			return "", nil, err
+		}
+		err = util.ValidateIOPCAConfig(client, finalIOP)
+		if err != nil {
+			return "", nil, err
+		}
+	}
 	// InstallPackagePath may have been a URL, change to extracted to local file path.
 	finalIOP.Spec.InstallPackagePath = installPackagePath
 	return util.ToYAMLWithJSONPB(finalIOP), finalIOP, nil
@@ -209,7 +218,7 @@ func ReadYamlProfile(inFilenames []string, setFlags []string, force bool, l clog
 		profile = fp
 	}
 	// The profile coming from --set flag has the highest precedence.
-	psf := getValueForSetFlag(setFlags, "profile")
+	psf := GetValueForSetFlag(setFlags, "profile")
 	if psf != "" {
 		profile = psf
 	}
@@ -368,9 +377,7 @@ func getClusterSpecificValues(config *rest.Config, force bool, l clog.Logger) (s
 	} else {
 		overlays = append(overlays, jwt)
 	}
-
 	return makeTreeFromSetList(overlays)
-
 }
 
 func getFSGroupOverlay(config *rest.Config) (string, error) {
@@ -489,9 +496,9 @@ func overlaySetFlagValues(iopYAML string, setFlags []string) (string, error) {
 	return string(out), nil
 }
 
-// getValueForSetFlag parses the passed set flags which have format key=value and if any set the given path,
+// GetValueForSetFlag parses the passed set flags which have format key=value and if any set the given path,
 // returns the corresponding value, otherwise returns the empty string. setFlags must have valid format.
-func getValueForSetFlag(setFlags []string, path string) string {
+func GetValueForSetFlag(setFlags []string, path string) string {
 	ret := ""
 	for _, sf := range setFlags {
 		p, v := getPV(sf)

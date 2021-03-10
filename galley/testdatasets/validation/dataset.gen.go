@@ -150,8 +150,9 @@ kind: EnvoyFilter
 metadata:
   name: simple-envoy-filter
 spec:
-  workloadSelector:
-    labels:
+  configPatches:
+  - applyTo: LISTENER
+    patch: {}
 `)
 
 func datasetNetworkingV1alpha3EnvoyfilterInvalidYamlBytes() ([]byte, error) {
@@ -528,7 +529,7 @@ spec:
     labels:
       app.kubernetes.io/name: reviews
       app.kubernetes.io/version: "1.3.4"
-  template:
+      ".": "~"
 `)
 
 func datasetNetworkingV1alpha3WorkloadgroupInvalidYamlBytes() ([]byte, error) {

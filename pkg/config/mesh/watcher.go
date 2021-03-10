@@ -15,19 +15,15 @@
 package mesh
 
 import (
-	"fmt"
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/davecgh/go-spew/spew"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pkg/kube"
-	"istio.io/istio/pkg/kube/configmapwatcher"
 	"istio.io/pkg/filewatcher"
 	"istio.io/pkg/log"
 )
@@ -45,19 +41,19 @@ type Watcher interface {
 	AddMeshHandler(func())
 }
 
-var _ Watcher = &watcher{}
+var _ Watcher = &InternalWatcher{}
 
-type watcher struct {
-	mutex    sync.Mutex
-	handlers []func()
-	mesh     *meshconfig.MeshConfig
+type InternalWatcher struct {
+	mutex      sync.Mutex
+	handlers   []func()
+	MeshConfig *meshconfig.MeshConfig
 }
 
 // NewFixedWatcher creates a new Watcher that always returns the given mesh config. It will never
 // fire any events, since the config never changes.
 func NewFixedWatcher(mesh *meshconfig.MeshConfig) Watcher {
-	return &watcher{
-		mesh: mesh,
+	return &InternalWatcher{
+		MeshConfig: mesh,
 	}
 }
 
@@ -69,8 +65,8 @@ func NewFileWatcher(fileWatcher filewatcher.FileWatcher, filename string) (Watch
 		return nil, err
 	}
 
-	w := &watcher{
-		mesh: meshConfig,
+	w := &InternalWatcher{
+		MeshConfig: meshConfig,
 	}
 
 	// Watch the config file for changes and reload if it got modified
@@ -81,56 +77,35 @@ func NewFileWatcher(fileWatcher filewatcher.FileWatcher, filename string) (Watch
 			log.Warnf("failed to read mesh configuration, using default: %v", err)
 			return
 		}
-		w.handleMeshConfig(meshConfig)
+		w.HandleMeshConfig(meshConfig)
 	})
 	return w, nil
 }
 
-// NewConfigMapWatcher creates a new Watcher for changes to the given ConfigMap.
-func NewConfigMapWatcher(client kube.Client, namespace, name, key string) Watcher {
-	defaultMesh := DefaultMeshConfig()
-	w := &watcher{mesh: &defaultMesh}
-	c := configmapwatcher.NewController(client, namespace, name, func(cm *v1.ConfigMap) {
-		meshConfig, err := ReadConfigMap(cm, key)
-		if err != nil {
-			// Keep the last known config in case there's a misconfiguration issue.
-			log.Warnf("failed to read mesh config from ConfigMap: %v", err)
-			return
-		}
-		w.handleMeshConfig(meshConfig)
-	})
-
-	stop := make(chan struct{})
-	go c.Run(stop)
-	// Ensure the ConfigMap is initially loaded if present.
-	cache.WaitForCacheSync(stop, c.HasSynced)
-	return w
-}
-
 // Mesh returns the latest mesh config.
-func (w *watcher) Mesh() *meshconfig.MeshConfig {
-	return (*meshconfig.MeshConfig)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&w.mesh))))
+func (w *InternalWatcher) Mesh() *meshconfig.MeshConfig {
+	return (*meshconfig.MeshConfig)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&w.MeshConfig))))
 }
 
 // AddMeshHandler registers a callback handler for changes to the mesh config.
-func (w *watcher) AddMeshHandler(h func()) {
+func (w *InternalWatcher) AddMeshHandler(h func()) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	w.handlers = append(w.handlers, h)
 }
 
-func (w *watcher) handleMeshConfig(meshConfig *meshconfig.MeshConfig) {
+func (w *InternalWatcher) HandleMeshConfig(meshConfig *meshconfig.MeshConfig) {
 	var handlers []func()
 
 	w.mutex.Lock()
-	if !reflect.DeepEqual(meshConfig, w.mesh) {
+	if !reflect.DeepEqual(meshConfig, w.MeshConfig) {
 		log.Infof("mesh configuration updated to: %s", spew.Sdump(meshConfig))
-		if !reflect.DeepEqual(meshConfig.ConfigSources, w.mesh.ConfigSources) {
+		if !reflect.DeepEqual(meshConfig.ConfigSources, w.MeshConfig.ConfigSources) {
 			log.Info("mesh configuration sources have changed")
 			// TODO Need to recreate or reload initConfigController()
 		}
 
-		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&w.mesh)), unsafe.Pointer(meshConfig))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&w.MeshConfig)), unsafe.Pointer(meshConfig))
 		handlers = append(handlers, w.handlers...)
 	}
 	w.mutex.Unlock()
@@ -140,23 +115,25 @@ func (w *watcher) handleMeshConfig(meshConfig *meshconfig.MeshConfig) {
 	}
 }
 
-func ReadConfigMap(cm *v1.ConfigMap, key string) (*meshconfig.MeshConfig, error) {
-	if cm == nil {
-		log.Info("no ConfigMap found, using default mesh config")
-		defaultMesh := DefaultMeshConfig()
-		return &defaultMesh, nil
-	}
-
-	cfgYaml, exists := cm.Data[key]
-	if !exists {
-		return nil, fmt.Errorf("missing ConfigMap key %q", key)
-	}
-
-	meshConfig, err := ApplyMeshConfigDefaults(cfgYaml)
-	if err != nil {
-		return nil, fmt.Errorf("failed reading mesh config: %v. YAML:\n%s", err, cfgYaml)
-	}
-
-	log.Info("Loaded mesh config from Kubernetes API server.")
-	return meshConfig, nil
+// Add to the FileWatcher the provided file and execute the provided function
+// on any change event for this file.
+// Using a debouncing mechanism to avoid calling the callback multiple times
+// per event.
+func addFileWatcher(fileWatcher filewatcher.FileWatcher, file string, callback func()) {
+	_ = fileWatcher.Add(file)
+	go func() {
+		var timerC <-chan time.Time
+		for {
+			select {
+			case <-timerC:
+				timerC = nil
+				callback()
+			case <-fileWatcher.Events(file):
+				// Use a timer to debounce configuration updates
+				if timerC == nil {
+					timerC = time.After(100 * time.Millisecond)
+				}
+			}
+		}
+	}()
 }

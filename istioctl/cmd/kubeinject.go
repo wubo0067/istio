@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
+	"istio.io/istio/istioctl/pkg/clioptions"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/inject"
@@ -44,19 +45,21 @@ const (
 
 func createInterface(kubeconfig string) (kubernetes.Interface, error) {
 	restConfig, err := kube.BuildClientConfig(kubeconfig, configContext)
-
 	if err != nil {
 		return nil, err
 	}
 	return kubernetes.NewForConfig(restConfig)
 }
 
-func getMeshConfigFromConfigMap(kubeconfig, command string) (*meshconfig.MeshConfig, error) {
+func getMeshConfigFromConfigMap(kubeconfig, command, revision string) (*meshconfig.MeshConfig, error) {
 	client, err := createInterface(kubeconfig)
 	if err != nil {
 		return nil, err
 	}
 
+	if meshConfigMapName == defaultMeshConfigMapName && revision != "" {
+		meshConfigMapName = fmt.Sprintf("%s-%s", defaultMeshConfigMapName, revision)
+	}
 	meshConfigMap, err := client.CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), meshConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("could not read valid configmap %q from namespace %q: %v - "+
@@ -79,12 +82,15 @@ func getMeshConfigFromConfigMap(kubeconfig, command string) (*meshconfig.MeshCon
 }
 
 // grabs the raw values from the ConfigMap. These are encoded as JSON.
-func getValuesFromConfigMap(kubeconfig string) (string, error) {
+func getValuesFromConfigMap(kubeconfig, revision string) (string, error) {
 	client, err := createInterface(kubeconfig)
 	if err != nil {
 		return "", err
 	}
 
+	if injectConfigMapName == defaultInjectConfigMapName && revision != "" {
+		injectConfigMapName = fmt.Sprintf("%s-%s", defaultInjectConfigMapName, revision)
+	}
 	meshConfigMap, err := client.CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), injectConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("could not find valid configmap %q from namespace  %q: %v - "+
@@ -101,15 +107,32 @@ func getValuesFromConfigMap(kubeconfig string) (string, error) {
 	return valuesData, nil
 }
 
-func getInjectConfigFromConfigMap(kubeconfig string) (string, error) {
+func readInjectConfigFile(f []byte) (inject.Templates, error) {
+	var injectConfig inject.Config
+	err := yaml.Unmarshal(f, &injectConfig)
+	if err != nil || len(injectConfig.Templates) == 0 {
+		// This must be a direct template, instead of an inject.Config. We support both formats
+		return map[string]string{inject.SidecarTemplateName: string(f)}, nil
+	}
+	cfg, err := inject.UnmarshalConfig(f)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Templates, err
+}
+
+func getInjectConfigFromConfigMap(kubeconfig, revision string) (inject.Templates, error) {
 	client, err := createInterface(kubeconfig)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
+	if injectConfigMapName == defaultInjectConfigMapName && revision != "" {
+		injectConfigMapName = fmt.Sprintf("%s-%s", defaultInjectConfigMapName, revision)
+	}
 	meshConfigMap, err := client.CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), injectConfigMapName, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("could not find valid configmap %q from namespace  %q: %v - "+
+		return nil, fmt.Errorf("could not find valid configmap %q from namespace  %q: %v - "+
 			"Use --injectConfigFile or re-run kube-inject with `-i <istioSystemNamespace> and ensure istio-sidecar-injector configmap exists",
 			injectConfigMapName, istioNamespace, err)
 	}
@@ -118,16 +141,16 @@ func getInjectConfigFromConfigMap(kubeconfig string) (string, error) {
 	// key
 	injectData, exists := meshConfigMap.Data[injectConfigMapKey]
 	if !exists {
-		return "", fmt.Errorf("missing configuration map key %q in %q",
+		return nil, fmt.Errorf("missing configuration map key %q in %q",
 			injectConfigMapKey, injectConfigMapName)
 	}
-	var injectConfig inject.Config
-	if err := yaml.Unmarshal([]byte(injectData), &injectConfig); err != nil {
-		return "", fmt.Errorf("unable to convert data from configmap %q: %v",
+	injectConfig, err := inject.UnmarshalConfig([]byte(injectData))
+	if err != nil {
+		return nil, fmt.Errorf("unable to convert data from configmap %q: %v",
 			injectConfigMapName, err)
 	}
 	log.Debugf("using inject template from configmap %q", injectConfigMapName)
-	return injectConfig.Template, nil
+	return injectConfig.Templates, nil
 }
 
 func validateFlags() error {
@@ -162,7 +185,7 @@ const (
 )
 
 func injectCommand() *cobra.Command {
-	var revision string
+	var opts clioptions.ControlPlaneOptions
 
 	injectCmd := &cobra.Command{
 		Use:   "kube-inject",
@@ -258,23 +281,23 @@ kube-inject on deployments to get the most up-to-date changes.
 					return err
 				}
 			} else {
-				if meshConfig, err = getMeshConfigFromConfigMap(kubeconfig, "kube-inject"); err != nil {
+				if meshConfig, err = getMeshConfigFromConfigMap(kubeconfig, "kube-inject", opts.Revision); err != nil {
 					return err
 				}
 			}
 
-			var sidecarTemplate string
+			var sidecarTemplate inject.Templates
 			if injectConfigFile != "" {
 				injectionConfig, err := ioutil.ReadFile(injectConfigFile) // nolint: vetshadow
 				if err != nil {
 					return err
 				}
-				var injectConfig inject.Config
-				if err := yaml.Unmarshal(injectionConfig, &injectConfig); err != nil {
+				injectConfig, err := readInjectConfigFile(injectionConfig)
+				if err != nil {
 					return multierror.Append(err, fmt.Errorf("loading --injectConfigFile"))
 				}
-				sidecarTemplate = injectConfig.Template
-			} else if sidecarTemplate, err = getInjectConfigFromConfigMap(kubeconfig); err != nil {
+				sidecarTemplate = injectConfig
+			} else if sidecarTemplate, err = getInjectConfigFromConfigMap(kubeconfig, opts.Revision); err != nil {
 				return err
 			}
 
@@ -285,14 +308,14 @@ kube-inject on deployments to get the most up-to-date changes.
 					return err
 				}
 				valuesConfig = string(valuesConfigBytes)
-			} else if valuesConfig, err = getValuesFromConfigMap(kubeconfig); err != nil {
+			} else if valuesConfig, err = getValuesFromConfigMap(kubeconfig, opts.Revision); err != nil {
 				return err
 			}
 
 			if emitTemplate {
 				cfg := inject.Config{
-					Policy:   inject.InjectionPolicyEnabled,
-					Template: sidecarTemplate,
+					Policy:    inject.InjectionPolicyEnabled,
+					Templates: sidecarTemplate,
 				}
 				out, err := yaml.Marshal(&cfg)
 				if err != nil {
@@ -303,7 +326,7 @@ kube-inject on deployments to get the most up-to-date changes.
 			}
 
 			var warnings []string
-			retval := inject.IntoResourceFile(sidecarTemplate, valuesConfig, revision, meshConfig,
+			retval := inject.IntoResourceFile(sidecarTemplate, valuesConfig, opts.Revision, meshConfig,
 				reader, writer, func(warning string) {
 					warnings = append(warnings, warning)
 				})
@@ -345,8 +368,6 @@ kube-inject on deployments to get the most up-to-date changes.
 	injectCmd.PersistentFlags().StringVar(&injectConfigMapName, "injectConfigMapName", defaultInjectConfigMapName,
 		fmt.Sprintf("ConfigMap name for Istio sidecar injection, key should be %q.", injectConfigMapKey))
 
-	injectCmd.PersistentFlags().StringVar(&revision, "revision", "",
-		"Control plane revision")
-
+	opts.AttachControlPlaneFlags(injectCmd)
 	return injectCmd
 }

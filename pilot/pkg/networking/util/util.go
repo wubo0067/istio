@@ -270,24 +270,10 @@ func SortVirtualHosts(hosts []*route.VirtualHost) {
 	})
 }
 
-// IsIstioVersionGE15 checks whether the given Istio version is greater than or equals 1.5.
-func IsIstioVersionGE15(node *model.Proxy) bool {
-	return node.IstioVersion == nil ||
-		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 5, Patch: -1}) >= 0
-}
-
-// IsIstioVersionGE18 checks whether the given Istio version is greater than or equals 1.8.
-func IsIstioVersionGE18(node *model.Proxy) bool {
+// IsIstioVersionGE19 checks whether the given Istio version is greater than or equals 1.9.
+func IsIstioVersionGE19(node *model.Proxy) bool {
 	return node == nil || node.IstioVersion == nil ||
-		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 8, Patch: -1}) >= 0
-}
-
-func BuildInboundSubsetKey(node *model.Proxy, subsetName string, hostname host.Name, port int) string {
-	if IsIstioVersionGE18(node) {
-		// On 1.8+ Proxies, we use format inbound|port||. Telemetry no longer requires the hostname
-		return model.BuildSubsetKey(model.TrafficDirectionInbound, "", "", port)
-	}
-	return model.BuildSubsetKey(model.TrafficDirectionInbound, subsetName, hostname, port)
+		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 9, Patch: -1}) >= 0
 }
 
 func IsProtocolSniffingEnabledForPort(port *model.Port) bool {
@@ -316,7 +302,7 @@ func ConvertLocality(locality string) *core.Locality {
 	}
 }
 
-// ConvertLocality converts '/' separated locality string to Locality struct.
+// LocalityToString converts Locality struct to '/' separated locality string.
 func LocalityToString(l *core.Locality) string {
 	if l == nil {
 		return ""
@@ -428,23 +414,18 @@ func AddConfigInfoMetadata(metadata *core.Metadata, config config.Meta) *core.Me
 	return metadata
 }
 
-// AddSubsetToMetadata will build a new core.Metadata struct containing the
-// subset name supplied. This is used for telemetry reporting. A new core.Metadata
-// is created to prevent modification to shared base Metadata across subsets, etc.
-// This should be called after the initial "istio" metadata has been created for the
-// cluster. If the "istio" metadata field is not already defined, the subset information will
-// not be added (to prevent adding this information where not needed).
-func AddSubsetToMetadata(md *core.Metadata, subset string) *core.Metadata {
-	updatedMeta := &core.Metadata{}
-	proto.Merge(updatedMeta, md)
-	if istioMeta, ok := updatedMeta.FilterMetadata[IstioMetadataKey]; ok {
+// AddSubsetToMetadata will insert the subset name supplied. This should be called after the initial
+// "istio" metadata has been created for the cluster. If the "istio" metadata field is not already
+// defined, the subset information will not be added (to prevent adding this information where not
+// needed). This is used for telemetry reporting.
+func AddSubsetToMetadata(md *core.Metadata, subset string) {
+	if istioMeta, ok := md.FilterMetadata[IstioMetadataKey]; ok {
 		istioMeta.Fields["subset"] = &pstruct.Value{
 			Kind: &pstruct.Value_StringValue{
 				StringValue: subset,
 			},
 		}
 	}
-	return updatedMeta
 }
 
 // IsHTTPFilterChain returns true if the filter chain contains a HTTP connection manager filter
@@ -517,7 +498,7 @@ func MergeAnyWithAny(dst *any.Any, src *any.Any) (*any.Any, error) {
 }
 
 // BuildLbEndpointMetadata adds metadata values to a lb endpoint
-func BuildLbEndpointMetadata(network, tlsMode, workloadname, namespace string, labels labels.Instance) *core.Metadata {
+func BuildLbEndpointMetadata(network, tlsMode, workloadname, namespace, clusterID string, labels labels.Instance) *core.Metadata {
 	if network == "" && tlsMode == model.DisabledTLSModeLabel && !shouldAddTelemetryLabel(workloadname) {
 		return nil
 	}
@@ -556,6 +537,8 @@ func BuildLbEndpointMetadata(network, tlsMode, workloadname, namespace string, l
 		if csr, ok := labels[model.IstioCanonicalServiceRevisionLabelName]; ok {
 			sb.WriteString(csr)
 		}
+		sb.WriteString(";")
+		sb.WriteString(clusterID)
 		addIstioEndpointLabel(metadata, "workload", &pstruct.Value{Kind: &pstruct.Value_StringValue{StringValue: sb.String()}})
 	}
 
@@ -662,12 +645,28 @@ func CidrRangeSliceEqual(a, b []*core.CidrRange) bool {
 	}
 
 	for i := range a {
-		if a[i].GetAddressPrefix() != b[i].GetAddressPrefix() || a[i].GetPrefixLen().GetValue() != b[i].GetPrefixLen().GetValue() {
+		netA, err := toIPNet(a[i])
+		if err != nil {
+			return false
+		}
+		netB, err := toIPNet(b[i])
+		if err != nil {
+			return false
+		}
+		if netA.IP.String() != netB.IP.String() {
 			return false
 		}
 	}
 
 	return true
+}
+
+func toIPNet(c *core.CidrRange) (*net.IPNet, error) {
+	_, cA, err := net.ParseCIDR(c.AddressPrefix + "/" + strconv.Itoa(int(c.PrefixLen.GetValue())))
+	if err != nil {
+		log.Errorf("failed to parse CidrRange %v as IPNet: %v", c, err)
+	}
+	return cA, err
 }
 
 // meshconfig ForwardClientCertDetails and the Envoy config enum are off by 1

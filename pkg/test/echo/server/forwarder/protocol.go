@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go/http3"
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -111,6 +113,7 @@ func newProtocol(cfg Config) (protocol, error) {
 	}
 	tlsConfig := &tls.Config{
 		GetClientCertificate: getClientCertificate,
+		NextProtos:           cfg.Request.GetAlpn().GetValue(),
 	}
 	if cfg.Request.CaCert != "" {
 		certPool := x509.NewCertPool()
@@ -122,11 +125,21 @@ func newProtocol(cfg Config) (protocol, error) {
 		tlsConfig.InsecureSkipVerify = true
 	}
 
+	// Disable redirects
+	redirectFn := func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	if cfg.Request.FollowRedirects {
+		redirectFn = nil
+	}
 	switch scheme.Instance(u.Scheme) {
 	case scheme.HTTP, scheme.HTTPS:
-		tlsConfig.NextProtos = []string{"http/1.1"}
+		if cfg.Request.Alpn == nil {
+			tlsConfig.NextProtos = []string{"http/1.1"}
+		}
 		proto := &httpProtocol{
 			client: &http.Client{
+				CheckRedirect: redirectFn,
 				Transport: &http.Transport{
 					// We are creating a Transport on each ForwardEcho request. Transport is what holds connections,
 					// so this means every ForwardEcho request will create a new connection. Without setting an idle timeout,
@@ -134,13 +147,23 @@ func newProtocol(cfg Config) (protocol, error) {
 					IdleConnTimeout: time.Second,
 					TLSClientConfig: tlsConfig,
 					DialContext:     httpDialContext,
+					Proxy:           http.ProxyFromEnvironment,
 				},
 				Timeout: timeout,
 			},
 			do: cfg.Dialer.HTTP,
 		}
-		if cfg.Request.Http2 && scheme.Instance(u.Scheme) == scheme.HTTPS {
-			tlsConfig.NextProtos = []string{"http/2"}
+		if cfg.Request.Http3 && scheme.Instance(u.Scheme) == scheme.HTTP {
+			return nil, fmt.Errorf("http3 requires HTTPS")
+		} else if cfg.Request.Http3 {
+			proto.client.Transport = &http3.RoundTripper{
+				TLSClientConfig: tlsConfig,
+				QuicConfig:      &quic.Config{},
+			}
+		} else if cfg.Request.Http2 && scheme.Instance(u.Scheme) == scheme.HTTPS {
+			if cfg.Request.Alpn == nil {
+				tlsConfig.NextProtos = []string{"h2"}
+			}
 			proto.client.Transport = &http2.Transport{
 				TLSClientConfig: tlsConfig,
 				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
@@ -196,6 +219,8 @@ func newProtocol(cfg Config) (protocol, error) {
 		return &websocketProtocol{
 			dialer: dialer,
 		}, nil
+	case scheme.DNS:
+		return &dnsProtocol{}, nil
 	case scheme.TCP:
 		return &tcpProtocol{
 			conn: func() (net.Conn, error) {
@@ -211,7 +236,6 @@ func newProtocol(cfg Config) (protocol, error) {
 					return cfg.Dialer.TCP(dialer, ctx, address)
 				}
 				return tls.Dial("tcp", address, tlsConfig)
-
 			},
 		}, nil
 	}

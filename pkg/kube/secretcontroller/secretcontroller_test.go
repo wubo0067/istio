@@ -65,6 +65,7 @@ func updateCallback(_ kube.Client, id string) error {
 	updated = id
 	return nil
 }
+
 func deleteCallback(id string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -116,7 +117,7 @@ func Test_SecretController(t *testing.T) {
 	t.Cleanup(func() {
 		close(stopCh)
 	})
-	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace, time.Microsecond)
+	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace, time.Microsecond, stopCh)
 	kube.WaitForCacheSyncInterval(stopCh, time.Microsecond, c.informer.HasSynced)
 	clientset.RunAndWait(stopCh)
 

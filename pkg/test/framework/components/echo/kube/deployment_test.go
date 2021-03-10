@@ -18,23 +18,22 @@ import (
 
 	testutil "istio.io/istio/pilot/test/util"
 	"istio.io/istio/pkg/config/protocol"
+	"istio.io/istio/pkg/test/framework/components/cluster"
+	"istio.io/istio/pkg/test/framework/components/cluster/clusterboot"
 	"istio.io/istio/pkg/test/framework/components/echo"
-	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/components/echo/common"
 	"istio.io/istio/pkg/test/framework/image"
 	"istio.io/istio/pkg/test/framework/resource"
-	kubetest "istio.io/istio/pkg/test/kube"
 )
 
-var (
-	settings = &image.Settings{
-		Hub:        "testing.hub",
-		Tag:        "latest",
-		PullPolicy: "Always",
-	}
-)
+var settings = &image.Settings{
+	Hub:             "testing.hub",
+	Tag:             "latest",
+	PullPolicy:      "Always",
+	ImagePullSecret: "testdata/secret.yaml",
+}
 
 func TestDeploymentYAML(t *testing.T) {
-
 	testCase := []struct {
 		name         string
 		wantFilePath string
@@ -137,14 +136,24 @@ func TestDeploymentYAML(t *testing.T) {
 	}
 	for _, tc := range testCase {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.config.Cluster = resource.FakeCluster{
-				NameValue: "cluster-0",
-			}
-			serviceYAML, deploymentYAML, err := generateYAMLWithSettings(nil, tc.config, settings, kube.Cluster{
-				ExtendedClient: kubetest.MockClient{},
-			})
+			clusters, err := clusterboot.NewFactory().With(cluster.Config{
+				Kind: cluster.Fake, Name: "cluster-0",
+				Meta: cluster.ConfigMeta{"majorVersion": 1, "minorVersion": 16},
+			}).Build()
 			if err != nil {
-				t.Errorf("failed to generate yaml %v", err)
+				t.Fatal(err)
+			}
+			tc.config.Cluster = clusters[0]
+			if err := common.FillInDefaults(nil, &tc.config); err != nil {
+				t.Errorf("failed filling in defaults: %v", err)
+			}
+			serviceYAML, err := GenerateService(tc.config)
+			if err != nil {
+				t.Errorf("failed to generate service %v", err)
+			}
+			deploymentYAML, err := generateDeploymentYAML(tc.config, settings, resource.RevVerMap{})
+			if err != nil {
+				t.Errorf("failed to generate deployment %v", err)
 			}
 			gotBytes := []byte(serviceYAML + "---" + deploymentYAML)
 			wantedBytes := testutil.ReadGoldenFile(gotBytes, tc.wantFilePath, t)

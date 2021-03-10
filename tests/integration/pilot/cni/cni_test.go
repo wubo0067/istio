@@ -35,7 +35,6 @@ var (
 func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
-		RequireSingleCluster().
 		Setup(istio.Setup(&ist, func(_ resource.Context, cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 components:
@@ -88,6 +87,17 @@ func TestCNIReachability(t *testing.T) {
 
 						// If one of the two endpoints is naked, expect failure.
 						return !apps.Naked.Contains(src) && !apps.Naked.Contains(opts.Target)
+					},
+					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+						if apps.IsNaked(src) || apps.IsNaked(opts.Target) {
+							// If one of the two endpoints is naked, we don't send mTLS
+							return false
+						}
+						if apps.IsHeadless(opts.Target) && opts.Target == src {
+							// pod calling its own pod IP will not be intercepted
+							return false
+						}
+						return true
 					},
 				},
 			}
